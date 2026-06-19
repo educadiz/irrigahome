@@ -1,0 +1,544 @@
+RECURSOS DO FIRMWARE - IrrigaHome (ESP32)
+Ultima atualizacao: 2026-06-16
+
+=========================================================
+1) VISAO GERAL
+=========================================================
+Firmware modular para ESP32 (dual-core) com arquitetura orientada a gerenciadores.
+- Core 0: MQTT, Firebase, WebServer
+- Core 1: loop principal, sensores, controle, display
+Operacao local independente de nuvem; persistencia via NVS (parametros/agendas) e
+LittleFS (historico de eventos).
+
+Arquivos-fonte:
+  main.ino                   Orquestrador principal e logica de seguranca
+  config.h                   Credenciais, pinos, topicos e constantes globais
+  wifi_manager.{h,cpp}       Wi-Fi com backoff exponencial e NTP
+  mqtt_manager.{h,cpp}       MQTT/TLS, telemetria delta, integracao Firebase
+  sensor_manager.{h,cpp}     DHT22, umidade do solo (ADC), nivel de agua
+  actuator_manager.{h,cpp}   Rele da bomba, modos, agendamentos (NVS)
+  flow_meter_manager.{h,cpp} Fluxometro (ISR), calibracao linear por minimos quadrados
+  irrigation_event_manager.{h,cpp}  Historico JSONL em LittleFS, fila MQTT
+  display_manager.{h,cpp}    Dashboard TFT ST7789 240x320, flags de sujeira
+  web_server_manager.{h,cpp} Servidor HTTP local de manutencao (porta 80)
+  firmware_logger.h          Macros de log formatado com nivel e timestamp
+  TFT_eSPI_Config.h          Configuracao minima do driver TFT_eSPI
+
+
+=========================================================
+2) CONFIGURACAO CENTRAL (config.h)
+=========================================================
+Wi-Fi:
+  WIFI_SSID / WIFI_PASS — credenciais da rede
+
+MQTT (HiveMQ Cloud, SSL 8883):
+  MQTT_SERVER  3a00b184b81c41e4b8a36415e54f02e1.s1.eu.hivemq.cloud
+  MQTT_PORT    8883
+  MQTT_USER    irrigahome_esp32
+  DEVICE_NAME  Jardim_01
+
+Topicos MQTT (deviceId = MAC normalizado, ex: aa11bb22cc33):
+  Assinar  irrigahome/{deviceId}/commands
+  Publicar irrigahome/{deviceId}/telemetry
+  Publicar irrigahome/{deviceId}/status
+
+Firebase:
+  FIREBASE_PROJECT_URL  https://us-central1-irrigahome-db0c6.cloudfunctions.net
+
+Pinos de hardware:
+  GPIO  2  Rele da bomba (saida HIGH = ligado)
+  GPIO  4  DHT22 (temperatura + umidade do ar)
+  GPIO  5  Sensor de nivel de agua (HIGH = cheio)
+  GPIO 12  LED de status
+  GPIO 16  TFT DC (SPI)
+  GPIO 17  TFT CS (SPI)
+  GPIO 19  TFT RST (SPI)
+  GPIO 21  TFT MOSI (SPI)
+  GPIO 22  TFT CLK (SPI)
+  GPIO 23  Fluxometro (ISR FALLING edge)
+  GPIO 32  Umidade do solo (ADC)
+
+Parametros de automacao (padroes):
+  THRESHOLD_UMIDADE_PADRAO     40 %   (limiar para irrigacao automatica)
+  DURACAO_IRRIGACAO_PADRAO     10 s
+  DURACAO_IRRIGACAO_MAXIMA    1800 s  (30 min)
+  COOLDOWN_IRRIGACAO_PADRAO    60 s
+  SOLO_UMIDO_BLOQUEIO_PCT      75 %   (acima disso, irrigacao bloqueada)
+  SOLO_UMIDO_BLOQUEIO_PERSISTENCIA_MS  60000 ms
+
+Calibracao do fluxometro:
+  FLOW_PULSES_PER_LITER        260000  (13000 pulsos = 50 mL baseline)
+  PUMP_NOMINAL_FLOW_ML_PER_MIN 600     (referencia de contabilidade: 10 mL/s)
+
+Display e NTP:
+  SCREEN_WIDTH=240, SCREEN_HEIGHT=320
+  NTP_SERVER    pool.ntp.org
+  GMT_OFFSET_SECONDS  -10800  (UTC-3, Brazil)
+
+
+=========================================================
+3) LOOP PRINCIPAL (main.ino)
+=========================================================
+Ciclo de controle: 2 segundos (CONTROL_INTERVAL_MS = 2000)
+
+Inicializacao (setup()):
+  - Watchdog de tarefa (TWDT): timeout 30s, idle_core_mask=0
+  - Todos os managers inicializados
+  - Wi-Fi e NTP iniciados
+  - Display com splash
+
+Loop principal (loop()):
+  1. Monitoramento de seguranca — fluxo e nivel de agua
+  2. Verificacao de timeout de duracao ativa
+  3. Irrigacao automatica por sensor de solo
+  4. Irrigacao por agendamento
+  5. Reset do watchdog (uma vez por ciclo)
+
+Constantes do loop:
+  CONTROL_INTERVAL_MS           2000  ms
+  SOLO_SECO_PERSISTENCIA_MS    60000  ms  (solo deve ficar seco 1 min antes do auto)
+  FLOW_FLOW_WARNING_TIMEOUT_MS  5000  ms  (aviso se sem vazao apos 5s)
+  FLOW_NO_DETECTION_TIMEOUT_MS  6000  ms  (parada de seguranca apos 6s sem fluxo)
+  WATCHDOG_TIMEOUT_SECONDS         8  s   (WDT do Core 1)
+
+Funcao stopIrrigation(IrrigationStopReason reason):
+  - Centraliza desligamento fisico (pino + LED)
+  - Limpa activeUntil
+  - Registra evento via IrrigationEventManager
+
+Logica de irrigacao automatica (modoAuto=true):
+  Requer: nivel de agua HIGH, umidade < limiar, cooldown esgotado,
+          solo seco por 60s, solo nao acima de 75% (bloqueio)
+  Acao:   atuador.ligar() + irrigationEventManager.onIrrigationStart(TRIGGER_AUTOMATIC)
+
+Logica de agendamento (independe do modoAuto):
+  Requer: relogio sincronizado, nivel de agua HIGH, bomba desligada, cooldown esgotado
+  Usa:    atuador.checkDueSchedule() com janela de graca de 90 segundos
+  Cooldown separado do automatico (lastScheduleTrigger)
+
+
+=========================================================
+4) CONECTIVIDADE (wifi_manager)
+=========================================================
+Classe: WiFiManagerCustom
+
+Metodos:
+  connect()      Inicia Wi-Fi assincronamente (STA mode, nao bloqueante)
+  loop()         Mantem conexao com backoff exponencial + sincroniza NTP
+  isClockReady() True somente apos NTP sincronizado e timestamp valido
+
+Comportamento:
+  - WiFi.setSleep(false) + esp_wifi_set_ps(WIFI_PS_NONE) para eliminar latencia
+  - Backoff exponencial: 5s -> 10s -> 20s ... ate max 60s (reconexao e NTP)
+  - Guard de timestamp: se < 1.000.000.000 (ano 2001) trata como invalido
+  - Sem bloqueio do loop principal
+
+
+=========================================================
+5) MQTT E FIREBASE (mqtt_manager)
+=========================================================
+Classe: MqttManager
+Dependencias injetadas: IrrigationEventManager (referencia)
+Protocolo: MQTT sobre TLS (WiFiClientSecure + PubSubClient)
+
+Metodos principais:
+  begin(eventMgr)           Inicializa client, injeta dependencia
+  loop()                    Mantem conexao, despacha fila firebase
+  isConnected()             True se client.connected()
+  publishIrrigationEvent()  Publica evento MQTT
+  sendIrrigationEventToFirebase(...)  Enfileira para firebaseTask (Core 0)
+  requestStopIrrigation(reason)  Sinal de parada para o loop principal
+  isStopRequested() / consumeStopRequest()
+
+Topicos:
+  Assinar  commands: {"action":"irrigate","duration":30}
+                     {"action":"setMode","mode":"auto"}
+                     {"action":"setConfig","duration":20,"threshold":50,"cooldown":120}
+                     {"action":"addSchedule","id":"s1","ativo":true,
+                      "diasMask":127,"hour":6,"minute":0,"durationSeconds":30}
+  Publicar telemetry: {"solo":45,"temp":28.5,"umidAr":72,"nivelAgua":true,"bomba":false}
+  Publicar status:    {"modo":"manual","duracao":10,"threshold":40,"agendamentos":2}
+
+Telemetria delta:
+  - Compara valores novos com cache (lastSolo, lastTemp, lastUmidAr, lastNivelAgua, lastBomba)
+  - Publica somente se algum valor mudou E janela de 3s (TELEMETRY_STABLE_WINDOW_MS) esgotada
+  - Reduz carga no broker e banda
+
+Conexao MQTT assincrona:
+  - mqttConnectTask (Core 0, 32KB stack) executa TLS handshake separadamente
+  - Flag mqttJustConnected sinaliza Core 1 apos conexao
+  - Core 1 assina topicos e envia mensagens enfileiradas
+
+Firebase (firebaseTask, Core 0):
+  - FreeRTOS queue (firebaseQueue) recebe eventos de Core 1
+  - Envia HTTP GET para Cloud Function com parametros de consulta
+  - Apos HTTP 200: chama g_eventMgr->removeFromHistory(eventId)
+  - Sem registro no TWDT (TLS pode bloquear > 8s)
+
+Parser de comandos MQTT:
+  - Funcoes proprias: findFirstKey, parseAction
+  - Tolera payloads malformados
+  - Valida action, duration, mode e campos de agendamento
+
+
+=========================================================
+6) SENSORES (sensor_manager)
+=========================================================
+Classe: SensorManager
+
+Struct SensorData:
+  float temperatura   Graus Celsius (com offset aplicado)
+  float umidadeAr     Porcentagem (com offset aplicado)
+  int   umidadeSolo   0-100% (mapeado do ADC, com offset aplicado)
+  bool  nivelAgua     true = caixa cheia
+
+Metodos:
+  begin()                       Inicializa DHT, pino do nivel, carrega offsets da NVS
+  read()                        Retorna leitura com cache de 500ms
+  setOffsetTemperatura(float)   Limite: +/-10 C
+  setOffsetUmidadeSolo(int)     Limite: +/-30 %
+  setOffsetUmidadeAr(float)     Limite: +/-20 %
+  flushOffsets()                Grava todos os offsets na NVS de uma vez (dirty flag)
+
+Constantes:
+  SENSOR_READ_CACHE_MS      500    ms
+  DHT_STALE_TIMEOUT_MS    300000   ms (5 min sem leitura valida = falha)
+  DHT_FAILURE_LOG_INTERVAL_MS  30000  ms (throttle de log de falha)
+  SOIL_ADC_SAMPLES            6    amostras (media, reduz ruido do Wi-Fi)
+  SOLO_SECO                4095    referencia seco (ADC)
+  SOLO_UMIDO                  0    referencia umido (ADC)
+
+NVS namespace "sensoroffset":
+  off_temp    float
+  off_solo    int
+  off_umid_ar float
+
+Mapeamento do solo: map(adc, 4095, 0, 0, 100) -> porcentagem calibrada
+
+
+=========================================================
+7) ATUADOR E AGENDAMENTOS (actuator_manager)
+=========================================================
+Classe: ActuatorManager
+
+Struct IrrigationSchedule:
+  bool used
+  char id[64]             UUID/Firestore
+  char createdAt[32]      ISO timestamp
+  bool ativo
+  uint8_t diasMask        bits 0-6 = Dom-Sab
+  int hour, minute
+  int durationSeconds
+  time_t lastTriggerAt
+
+Enum IrrigationTriggerType:
+  TRIGGER_UNKNOWN=0, TRIGGER_MANUAL=1, TRIGGER_AUTOMATIC=2, TRIGGER_SCHEDULE=3
+
+Metodos:
+  begin()                      Carrega config da NVS, configura pinos
+  ligar() / desligar()         Controle fisico do rele (GPIO 2 e LED GPIO 12)
+  isLigado()                   Estado atual da bomba
+  setModoAuto(bool)            Grava imediatamente na NVS (estado critico)
+  setDuracaoSegundos(int)      Marca dirty; flush via flushConfig()
+  setThresholdUmidade(int)     Marca dirty
+  setCooldownSegundos(int)     Marca dirty
+  flushConfig()                Grava duracao/threshold/cooldown na NVS de uma vez
+  setLastAutoTrigger(ms)       Controle de cooldown automatico
+  setLastScheduleTrigger(ms)   Controle de cooldown de agendamento (separado)
+  setActiveUntil(ms)           Tempo de fim da irrigacao em andamento
+  getRemainingSeconds(now)     Segundos restantes
+  setCurrentTrigger(type)      Tipo de gatilho ativo
+  getScheduleCount()           Numero de agendas ativas (max 4)
+  upsertSchedule(id,ativo,diasMask,hour,minute,durationSec,createdAt)
+  removeSchedule(id)
+  checkDueSchedule(nowTs, outDuration, outId)  Janela de graca: 90 segundos
+  clearSchedules()
+
+NVS namespace "irrigahome":
+  modo_auto   bool     false (padrao)
+  duracao_s   int      10 s
+  threshold   int      40 %
+  cooldown_s  int      60 s
+  schedules   blob     binario das 4 agendas
+
+Limites de agendamento:
+  MAX_SCHEDULES = 4 por dispositivo
+  Ao adicionar a 5a: substitui a mais antiga
+  diasMask exemplos:
+    0b1111111 = todos os dias
+    0b0111110 = Segunda a Sexta
+    0b1000001 = Sabado e Domingo
+
+
+=========================================================
+8) FLUXOMETRO (flow_meter_manager)
+=========================================================
+Classe: FlowMeterManager
+
+Metodos:
+  begin()                           Init GPIO (GPIO 23), carrega calibracao da NVS
+  startMeasurement()                Vincula ISR (FALLING), zera contador
+  stopMeasurement()                 Desvincula ISR, registra resultado
+  getTotalPulses()                  Leitura atomica via mutex
+  getTotalVolumeLiters()            Aplica calibracao
+  getAvgFlowRateLpm()               Litros por minuto durante a medicao
+  hasFlowDetected()                 True se pulsos > 0
+  setPulsesPerLiter(float)          Atualizacao atomica
+  setVolumeCalibration(scale,off)   Calibracao simples (multiplicativa + offset)
+  addCalibrationSample(pulses,ml)   Adiciona amostra para calibracao linear
+  computeLinearCalibration()        Regressao linear por minimos quadrados
+  clearCalibrationSamples()
+  getLinearCalibrationCoefficients(a,b)
+  addCalibrationSampleFromCurrentMeasurement(realVolumeMl)
+  setCalibrationVolumeCorrectionFactor(factor)
+  loadCalibration() / saveCalibration()  NVS namespace "flowcal"
+
+Dois modos de calibracao:
+  Simples:  volume_mL = (pulses / pulsesPerLiter) * 1000 * scale + offset
+  Linear:   volume_mL = a * pulsos + b  (minimos quadrados, ate 64 amostras)
+
+ISR:
+  _isr() em IRAM_ATTR, incrementa _pulseCount atomicamente
+  Protecao de acesso: portENTER_CRITICAL
+
+NVS namespace "flowcal":
+  scale   float
+  offset  float
+  a, b    float (coeficientes lineares)
+
+Constantes:
+  FLOW_PULSES_PER_LITER   260000
+  PUMP_NOMINAL_FLOW_ML_PER_MIN  600
+  MAX_CAL_SAMPLES         64
+  LEGACY_FLOW_VOLUME_SCALE  1.1489 (detectado -> migra automaticamente)
+
+
+=========================================================
+9) EVENTOS E HISTORICO (irrigation_event_manager)
+=========================================================
+Classe: IrrigationEventManager
+
+Enum IrrigationStopReason:
+  STOP_REASON_COMPLETED=0  Timeout normal
+  STOP_REASON_MANUAL=1     Parada pelo usuario
+  STOP_REASON_NO_WATER=2   Caixa vazia
+  STOP_REASON_NO_FLOW=3    Sem vazao detectada
+
+Struct IrrigationEvent (fila RAM, max 8):
+  eventId, startAt, endAt, durationSec
+  trigger, stopReason, sentToMqtt
+  totalPulses, totalVolumeLiters, avgFlowRateLpm
+  totalVolumeMl, accountingVolumeMl, nominalFlowRateMlPerMin
+  flowDetected, flowStatus ("OK" | "ZERO_FLOW" | "ANOMALY")
+
+Struct IrrigationHistoryEntry (LittleFS + buffer RAM, max 20):
+  Mesmos campos do IrrigationEvent + sentToFirebase
+  isSuccess(): stopReason == STOP_REASON_COMPLETED
+
+Metodos:
+  begin()                        Init LittleFS, carrega estado ativo e historico
+  onIrrigationStart(trigger)     Registra inicio, gera eventId, persiste estado
+  onIrrigationEnd(reason)        Calcula volume, salva em fila + LittleFS
+  update()                       Detecta estado orfao apos reboot (intervalo 5s)
+  isIrrigationActive()
+  getActiveIrrigationSeconds()
+  getPendingEventCount()
+  getNextPendingEvent(outEvent)
+  markEventSent(eventId)
+  removeFromHistory(eventId)     Thread-safe (mutex), chamado por firebaseTask
+  getHistoryCount()
+  getHistoryEvent(index, outEvent)
+  formatIso8601(timestamp, buf)  Utilitario estatico
+  generateEventId(buf)           timestamp + sufixo aleatorio
+
+Volume sem fluxometro:
+  volume_mL = durationSec * (72.0 / 6.0) = 12 mL/s (baseado no fluxo nominal)
+
+Arquivos LittleFS:
+  /irrg_state.json    Estado de irrigacao ativa (recuperacao pos-reboot)
+    {"isActive":true,"startAt":1708612345,"trigger":2,"eventId":"1708612345-abc1"}
+
+  /irrg_history.jsonl  Uma linha JSON por evento
+    {"eventId":"...","startAt":...,"endAt":...,"durationSec":30,"trigger":2,
+     "stopReason":0,"totalVolumeMl":360.0,"accountingVolumeMl":300.0,
+     "nominalFlowRateMlPerMin":600.0,"success":true,"sentToFirebase":false}
+
+Thread safety:
+  SemaphoreHandle_t _historyMutex (binario FreeRTOS)
+  Core 0 (firebaseTask) e Core 1 (loop) compartilham historyBuffer
+
+Deduplicacao:
+  sentIds[40][24] — cache volatil em RAM
+  isAlreadySent(eventId) / markIdAsSent(eventId)
+  Limpo ao reiniciar (sem persistencia)
+
+Recuperacao pos-reboot:
+  update() checa a cada 5s se activeState.isActive=true mas bomba fisicamente desligada
+  Se detectado: chama onIrrigationEnd(STOP_REASON_COMPLETED)
+
+
+=========================================================
+10) DISPLAY TFT (display_manager)
+=========================================================
+Classe: DisplayManager
+Hardware: Adafruit_ST7789, 240x320 pixels
+
+Metodos:
+  begin()       Inicializa SPI, driver, fontes
+  update()      Renderiza frame se dirty ou intervalo esgotado
+
+Temporalizacao:
+  FRAME_INTERVAL_MS        200  ms (throttle de frames)
+  BODY_REFRESH_INTERVAL_MS 1000 ms (atualiza sensores/estado)
+  HEADER_SLIDE_MS          3000 ms (duracao de cada slide do carrossel)
+  HEADER_BLANK_MS           150 ms (blank entre slides)
+
+Carrossel do cabecalho (rotacao automatica):
+  Slide 1: "Irriga Home"
+  Slide 2: IP do ESP32
+  Slide 3: MAC address
+
+Secoes do dashboard:
+  1. Cabecalho (carrossel: nome / IP / MAC)
+  2. Sensores: temperatura, umidade do ar, umidade do solo, nivel da caixa
+  3. Estado da bomba e modo (manual/automatico)
+  4. Indicadores de MQTT e Wi-Fi
+  5. Contagem de agendamentos ativos
+  6. Rodape: hora e data atual
+
+Cores (RGB565):
+  COLOR_BG=0x0000 (preto), COLOR_TEXT=0xFFFF (branco)
+  COLOR_ALERT=0xF800 (vermelho), COLOR_OK=0x07E0 (verde)
+  COLOR_ORANGE=0xFB80, COLOR_CYAN=0x07FF
+
+Anti-flicker:
+  - Dirty flags por campo (so redesenha o que mudou)
+  - Throttle de 200ms por frame
+  - Cabecalho fora do ciclo de refresh do corpo
+
+Funcoes de renderizacao:
+  drawPanel(x,y,w,h,fill,edge)         Retangulo com borda
+  drawCardValueCentered(x,y,w,h,val,color,size)
+  drawStatusDot(x,y,color)             Indicador circular
+  drawLeafIcon, drawThermometerIcon, drawDropletIcon, drawTankIcon, drawPumpIcon
+
+
+=========================================================
+11) WEB SERVER DE MANUTENCAO (web_server_manager)
+=========================================================
+Classe: WebServerManager
+Porta: HTTP 80, executado no Core 0
+
+Dependencias injetadas: SensorManager, ActuatorManager, FlowMeterManager
+
+Endpoints:
+  GET  /               Pagina HTML de manutencao (SPA em PROGMEM)
+  GET  /api/data        JSON com leituras ao vivo (polling de 3s pelo browser)
+  POST /api/auth        Login (campo: password)
+  POST /api/logout      Encerra sessao
+  POST /api/measure     Inicia/para medicao do fluxometro
+  POST /api/config      Atualiza offsets de sensor e calibracao de fluxo
+  POST /api/resetSchedules  Limpa todos os agendamentos da NVS
+
+Pagina HTML:
+  - SPA em PROGMEM (sem dependencias externas)
+  - Exibe leituras em tempo real
+  - Formulario de offsets (temperatura, solo, umidade do ar) e calibracao de fluxo
+  - Autenticacao com limite de 3 tentativas
+  - Layout responsivo (mobile-friendly)
+
+Config pending (thread-safe):
+  POST /api/config grava em estrutura _pending (Core 0)
+  applyPendingConfig() aplicado no loop principal (Core 1) — sem conflito de acesso
+
+Autenticacao:
+  Flag in-memory _authValid
+  Limite de 3 tentativas antes de bloquear sessao
+
+Execucao:
+  _task() como tarefa FreeRTOS no Core 0
+  Nao bloqueia Core 1 (loop de controle)
+
+
+=========================================================
+12) LOGGING (firmware_logger.h)
+=========================================================
+Macros inline (sem buffer externo):
+
+  fwLogLine(level, tag, message)    Prefixo + mensagem + nova linha
+  fwLogf(level, tag, format, ...)   Estilo printf com buffer interno
+  fwLogSection(tag, title)          Separador de secao
+
+Formato de saida:
+  [INFO][NET][1234ms] Wi-Fi conectado
+  [WARN][SAFETY][5678ms] Solo=35% threshold=40%
+  [SECTION][SETUP] ========== Initialization ==========
+
+
+=========================================================
+13) TOPICOS MQTT — REFERENCIA RAPIDA
+=========================================================
+{deviceId} = MAC normalizado sem separadores, minusculas (ex: aa11bb22cc33)
+
+Assinar:
+  irrigahome/{deviceId}/commands
+    {"action":"irrigate","duration":30}
+    {"action":"setMode","mode":"auto"}
+    {"action":"setConfig","duration":20,"threshold":50,"cooldown":120}
+    {"action":"addSchedule","id":"s1","ativo":true,"diasMask":127,
+     "hour":6,"minute":0,"durationSeconds":30}
+    {"action":"removeSchedule","id":"s1"}
+
+Publicar:
+  irrigahome/{deviceId}/telemetry
+    {"solo":45,"temp":28.5,"umidAr":72,"nivelAgua":true,"bomba":false}
+  irrigahome/{deviceId}/status
+    {"modo":"manual","duracao":10,"threshold":40,"agendamentos":2,"modoAuto":false}
+
+
+=========================================================
+14) MAPEAMENTO DE PINOS — REFERENCIA RAPIDA
+=========================================================
+GPIO  2   Saida    Rele da bomba (HIGH = ligado)
+GPIO  4   Entrada  DHT22 (temperatura + umidade do ar)
+GPIO  5   Entrada  Sensor de nivel de agua (HIGH = cheio)
+GPIO 12   Saida    LED de status
+GPIO 16   Saida    TFT DC (SPI)
+GPIO 17   Saida    TFT CS (SPI)
+GPIO 19   Saida    TFT RST (SPI)
+GPIO 21   Saida    TFT MOSI (SPI)
+GPIO 22   Saida    TFT CLK (SPI)
+GPIO 23   Entrada  Fluxometro (ISR FALLING edge)
+GPIO 32   ADC      Umidade do solo (4095=seco, 0=umido)
+
+
+=========================================================
+15) PERSISTENCIA — RESUMO DE NAMESPACES NVS E ARQUIVOS
+=========================================================
+NVS namespace "irrigahome":
+  modo_auto  bool  | duracao_s  int  | threshold  int  | cooldown_s  int
+  schedules  blob  (ate 4 agendamentos)
+
+NVS namespace "sensoroffset":
+  off_temp  float  | off_solo  int  | off_umid_ar  float
+
+NVS namespace "flowcal":
+  scale  float  | offset  float  | a  float  | b  float
+
+LittleFS:
+  /irrg_state.json     Estado de irrigacao ativa (recuperacao pos-reboot)
+  /irrg_history.jsonl  Historico de eventos (max 20 linhas, formato JSONL)
+
+
+=========================================================
+16) PADROES ARQUITETURAIS
+=========================================================
+- Injecao de dependencia:  gerenciadores injetados como referencia (sem extern cego)
+- Nao bloqueante:          Wi-Fi/MQTT/Firebase em tasks separadas com backoff
+- Thread safety:           semaforo FreeRTOS no historico; flags volatile entre cores
+- Watchdog:                TWDT Core 1, timeout 30s (cobre pior caso TLS)
+- Telemetria delta:        publica so se valor mudou + janela de estabilidade de 3s
+- Batch NVS:               dirty flag + flush unico evita escritas frequentes na flash
+- Recuperacao pos-reboot:  estado ativo persistido em LittleFS, verificado a cada 5s
+
+Fim.

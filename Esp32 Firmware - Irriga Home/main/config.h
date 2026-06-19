@@ -1,0 +1,88 @@
+// Responsabilidade: centralizar parametros e constantes do firmware.
+// O que faz: define credenciais, topicos MQTT, pinos, parametros de display/relogio
+// e valores padrao usados pelos demais modulos.
+
+#include <Arduino.h>
+#include <WiFi.h>
+
+#pragma once
+
+// Credenciais e dados sensíveis estão em secrets.h (não commitado no repositório).
+// Copie secrets.example.h para secrets.h e preencha com seus valores.
+#include "secrets.h"
+
+// Nome amigavel local do dispositivo.
+#define DEVICE_NAME "Jardim_01"
+
+static inline String getDeviceIdFromMac() {
+	String deviceId = WiFi.macAddress();
+	deviceId.replace(":", "");
+	deviceId.replace("-", "");
+	deviceId.toLowerCase();
+	return deviceId;
+}
+
+static inline String getMqttTelemetryTopic() {
+	return String("irrigahome/") + getDeviceIdFromMac() + "/telemetry";
+}
+
+static inline String getMqttStatusTopic() {
+	return String("irrigahome/") + getDeviceIdFromMac() + "/status";
+}
+
+static inline String getMqttCommandsTopic() {
+	return String("irrigahome/") + getDeviceIdFromMac() + "/commands";
+}
+
+// PINOS
+#define DHTPIN 4
+#define DHTTYPE DHT22
+#define SOIL_PIN 32
+#define WATER_LEVEL_PIN 5
+#define PUMP_PIN 2
+#define LED_PIN 12 // on-off (remapeado para liberar GPIO 23 ao sensor de vazao)
+#define FLOW_SENSOR_PIN 23
+#define FLOW_PULSES_PER_LITER 260000  // calibrado: 13000 pulsos = 50 mL -> 260000 pulsos/L
+// Volume real aferido a partir da nova referencia do sensor.
+// Com 13000 pulsos medidos para 50 mL, o fator base passa a ser 1.0.
+#define FLOW_VOLUME_SCALE 1.0f
+#define FLOW_VOLUME_OFFSET_ML 0.0f
+#define PUMP_NOMINAL_FLOW_ML_PER_MIN 600.0f
+#define PUMP_NOMINAL_FLOW_LPM (PUMP_NOMINAL_FLOW_ML_PER_MIN / 1000.0f)
+
+// DISPLAY
+// Novo painel TFT ST7789 240x320. Os pinos SDA/SCL do modulo sao reaproveitados
+// como linhas SPI de dados/clock para manter a mesma base de cabeamento.
+#define SCREEN_WIDTH 240
+#define SCREEN_HEIGHT 320
+#define DISPLAY_SDA_PIN 21
+#define DISPLAY_SCL_PIN 22
+#define DISPLAY_DC_PIN 16
+#define DISPLAY_CS_PIN 17
+#define DISPLAY_RST_PIN 19
+
+// RELOGIO (NTP)
+#define NTP_SERVER "pool.ntp.org"
+#define GMT_OFFSET_SECONDS -10800
+#define DAYLIGHT_OFFSET_SECONDS 0
+
+// SOLO
+#define SOLO_SECO 4095
+#define SOLO_UMIDO 0
+// Numero de amostras ADC consecutivas para media do solo.
+// O ADC do ESP32 e' ruidoso quando o radio WiFi esta ativo; 6 amostras
+// reduzem o desvio sem bloquear o loop (cada analogRead leva ~10 us).
+#define SOIL_ADC_SAMPLES 6
+
+// AUTO MODO
+#define THRESHOLD_UMIDADE_PADRAO 40
+#define DURACAO_IRRIGACAO_PADRAO 10
+#define DURACAO_IRRIGACAO_MAXIMA 1800
+#define COOLDOWN_IRRIGACAO_PADRAO 60
+
+// Protecao: irrigacao por agenda ou regra automatica so se solo < limiar (com persistencia)
+#define SOLO_UMIDO_BLOQUEIO_PCT 75
+#define SOLO_UMIDO_BLOQUEIO_PERSISTENCIA_MS 60000UL
+
+// FIREBASE CLOUD FUNCTIONS
+// FIREBASE_PROJECT_URL agora definido em secrets.h

@@ -1,0 +1,512 @@
+IrrigaHome - Descricao Geral do Projeto
+======================================
+Ultima atualizacao: 2026-06-16
+
+1) Visao geral
+--------------
+IrrigaHome e um sistema de irrigacao residencial/pequena escala com arquitetura hibrida:
+- App Android (Kotlin + Jetpack Compose) para controle, monitoramento e historico.
+- Firmware ESP32 (Arduino/C++) para leitura de sensores e acionamento da bomba/valvula.
+- Integracao cloud (Firebase Firestore + Auth + Cloud Functions Node.js) para dados remotos,
+  historico e automacoes.
+
+Objetivo principal:
+- Permitir irrigacao manual e automatica com seguranca operacional,
+  monitorar variaveis ambientais e registrar eventos para analise posterior.
+
+
+2) Estrutura hierarquica geral
+------------------------------
+IrrigaHome/
+|-- build.gradle.kts
+|-- gradle.properties
+|-- settings.gradle.kts
+|-- gradlew / gradlew.bat
+|-- local.properties
+|-- app/
+|   |-- build.gradle.kts
+|   |-- google-services.json
+|   |-- proguard-rules.pro
+|   `-- src/main/java/com/nr/irrigahome/
+|       |-- IrrigaHomeApp.kt         (Application: @HiltAndroidApp, lifecycle observer)
+|       |-- MainActivity.kt          (Entry point: navegacao Splash -> Auth -> Home)
+|       |-- di/
+|       |   |-- AppModule.kt         (Hilt: provem FirebaseAuth, FirebaseFirestore)
+|       |   `-- RepositoryModule.kt  (Hilt: @Binds interfaces -> implementacoes)
+|       |-- domain/
+|       |   |-- model/               (Modelos de dominio)
+|       |   |-- repository/          (Interfaces de repositorio)
+|       |   `-- usecase/             (Casos de uso de autenticacao)
+|       |-- data/
+|       |   |-- local/               (SharedPreferences: settings, login, device identity)
+|       |   |-- remote/              (Firestore: device, history, schedule)
+|       |   `-- repository/          (Firebase Auth repository)
+|       |-- presentation/
+|       |   |-- auth/                (AuthViewModel + LoginScreen)
+|       |   |-- home/                (IrrigaViewModel + PrincipalScreen)
+|       |   |-- history/             (HistoricoViewModel + HistoricoScreen)
+|       |   `-- schedule/            (AgendamentoScreen)
+|       |-- ui/
+|       |   |-- theme/               (Color, Theme, Typography - Material 3)
+|       |   `-- components/          (BaseScreen, LoadingPopup, ConflictDialog, etc.)
+|       `-- util/
+|           |-- MqttManager.kt
+|           |-- ScheduleConflictDetector.kt
+|           |-- SessionManager.kt
+|           |-- AppLifecycleObserver.kt
+|           `-- CooldownDebugHelper.kt
+|-- Esp32 Firmware - Irriga Home/
+|   |-- main.ino
+|   |-- config.h
+|   |-- wifi_manager.{h,cpp}
+|   |-- mqtt_manager.{h,cpp}
+|   |-- web_server_manager.{h,cpp}
+|   |-- sensor_manager.{h,cpp}
+|   |-- actuator_manager.{h,cpp}
+|   |-- flow_meter_manager.{h,cpp}
+|   |-- irrigation_event_manager.{h,cpp}
+|   |-- display_manager.{h,cpp}
+|   |-- maintenance-page.html
+|   |-- TFT_eSPI_Config.h
+|   `-- RECURSOS_FIRMWARE.txt
+|-- irrigahome-functions/
+|   |-- firebase.json
+|   |-- package.json
+|   `-- functions/
+|       |-- index.js
+|       `-- package.json
+|-- Extras/
+`-- gradle/
+    |-- libs.versions.toml
+    `-- wrapper/gradle-wrapper.properties
+
+
+3) Arquitetura do App Android
+-----------------------------
+
+3.1) Padrao: MVVM + Clean Architecture
+---------------------------------------
+O app adota MVVM com separacao em tres camadas:
+
+  PRESENTATION (UI)
+    - Jetpack Compose (sem XML layouts)
+    - ComponentActivity com navegacao manual por enum (Screen)
+    - Telas: LoginScreen, PrincipalScreen, HistoricoScreen, AgendamentoScreen
+    - Componentes reutilizaveis: BaseScreen, LoadingPopup, ManualIrrigationConflictDialog,
+      ScreenHeader, DeviceConnectingPopup
+
+  DOMAIN (Logica de negocio)
+    - Modelos: IrrigationHistoryEvent, IrrigationSchedule, DeviceProfile, IrrigationMode,
+      DeviceValidationState, ConflictCheckResult, IrrigationSettingsSnapshot
+    - Interfaces de repositorio: AuthRepository, DeviceRepository,
+      IrrigationHistoryRepository, IrrigationScheduleRepository, IrrigationSettingsRepository
+    - Use Cases: LoginUseCase, RegisterUseCase, LogoutUseCase,
+      AutoLoginUseCase, SendPasswordResetUseCase
+
+  DATA (Persistencia e acesso a dados)
+    - Remoto (Firebase):
+        data/remote/DeviceRepository.kt
+        data/remote/IrrigationHistoryRepository.kt
+        data/remote/IrrigationScheduleRepository.kt
+        data/repository/FirebaseAuthRepository.kt
+    - Local (SharedPreferences):
+        data/local/IrrigationSettingsRepository.kt  (modo, duracoes, limiares, cooldown)
+        data/local/LoginPreferencesRepository.kt     (email "lembrar de mim")
+        data/local/DeviceIdentityRepository.kt       (cache MAC address)
+
+3.2) ViewModels
+---------------
+  AuthViewModel (@HiltViewModel, ViewModel)
+    - Estado: AuthUiState (isLoading, isRegisterMode, isAuthenticated, errorMessage, infoMessage)
+    - Acoes: login, register, logout, sendPasswordReset, grantSessionAccess, blockSessionAccess
+    - Mapeamento de erros Firebase para mensagens em Portugues
+
+  IrrigaViewModel (@HiltViewModel, AndroidViewModel) — ViewModel principal
+    - Telemetria (mutableStateOf): isOnline, umidSolo, temperatura, umidAmbiente, nivelAgua
+    - Irrigacao: isWatering, wateringRemainingSeconds, cooldownRemainingSeconds
+    - Configuracoes: irrigationMode, manualWaterDurationSeconds, automaticWaterDurationSeconds,
+      automaticSoilThreshold, automaticCooldownSeconds, maxManualWaterTempC
+    - Dispositivo: deviceId, deviceDisplayName, hasLinkedDevice, deviceValidationState
+    - Agendamentos: agendamentos (List<IrrigationSchedule>), isLoadingSchedules
+    - Conflito: pendingConflict (ConflictCheckResult) — alerta se irrigacao manual interfere
+      com agendamento dentro de 60 minutos
+    - Seguranca: bloqueio por temperatura (maxManualWaterTempC), por nivel de agua vazio,
+      por modo automatico ativo, por cooldown ativo
+    - Integrado com MqttManager (callbacks de telemetria e status)
+
+  HistoricoViewModel (@HiltViewModel, ViewModel)
+    - Estado: loadingState (Loading/Empty/Success/Error), allEvents, filteredEvents
+    - Filtros: por tipo de gatilho (MANUAL/AUTOMATIC/SCHEDULE) e por intervalo de datas
+    - Atalhos: loadTodayHistory, loadThisWeekHistory, loadThisMonthHistory
+    - Suporte a observacao em tempo real (Firestore listener)
+    - removeEvent: exclusao individual de eventos
+
+3.3) Injecao de Dependencia (Hilt 2.59.2 + KSP)
+-------------------------------------------------
+  @HiltAndroidApp         -> IrrigaHomeApp
+  @AndroidEntryPoint      -> MainActivity
+  @HiltViewModel          -> AuthViewModel, IrrigaViewModel, HistoricoViewModel
+  @Module @InstallIn(SingletonComponent)
+    AppModule             -> provem FirebaseAuth e FirebaseFirestore
+    RepositoryModule      -> @Binds AuthRepository, IrrigationHistoryRepository,
+                             IrrigationScheduleRepository
+  @Inject (constructor)   -> todos os repositories, use cases, MqttManager,
+                             AppLifecycleObserver e classes utilitarias
+  @Singleton              -> DeviceRepository, IrrigationSettingsRepository,
+                             IrrigationHistoryRepository, IrrigationScheduleRepository,
+                             FirebaseAuthRepository, MqttManager
+
+
+4) Persistencia de Dados
+-------------------------
+
+4.1) Remota — Firebase
+  Firebase Authentication:
+    - Login com email/senha
+    - Registro de usuario com escrita inicial em Firestore (/users/{uid})
+    - Reset de senha por email
+
+  Firebase Firestore (estrutura de colecoes):
+    /users/{uid}
+      -> documento do usuario (nome, email, devices[])
+      -> /devices/{deviceId}  (metadata do dispositivo: firmwareVersion, macAddress, status)
+    /irrigationHistory/{deviceId}/events/{eventId}
+      -> campos: startAt, endAt, durationSeconds, triggerType, temperature,
+                 soilHumidity, airHumidity, waterLevel, success, stopReason
+    /schedules/{deviceId}/schedule_01..schedule_04/{scheduleId}
+      -> campos: diasSemana (List<Int>), hora (HH:mm), duracaoSegundos,
+                 ativo, deviceId, ownerUid, createdAtMillis
+      -> limite de 4 agendamentos por dispositivo (mais antigo substituido se cheio)
+
+4.2) Local — SharedPreferences
+  irrigahome_settings (IrrigationSettingsRepository):
+    - irrigationMode          (MANUAL | AUTOMATIC)
+    - manualWaterDuration     (5/10/15/20 seg, padrao 5)
+    - automaticWaterDuration  (5/10/15/20 seg, padrao 10)
+    - automaticSoilThreshold  (20/25/30/35/40 %, padrao 30)
+    - automaticCooldown       (180/300/600/900 seg, padrao 300)
+    - maxManualWaterTempC     (25/30/35/40 C, padrao 35)
+    - cooldownExpiryTimestamp (timestamp Unix do fim do cooldown)
+
+  login_preferences (LoginPreferencesRepository):
+    - email salvo para "lembrar de mim"
+
+  device_identity (DeviceIdentityRepository):
+    - lastKnownMacAddress (cache do MAC do dispositivo pareado)
+
+
+5) Comunicacao com o ESP32 — MQTT
+----------------------------------
+  Broker: HiveMQ Cloud (SSL, porta 8883)
+  Cliente: Eclipse Paho MQTT (org.eclipse.paho.client.mqttv3 1.2.5)
+
+  Topicos (usando {deviceId} = MAC do ESP32):
+    irrigahome/{deviceId}/telemetry  <- ESP32 envia dados de sensores
+    irrigahome/{deviceId}/status     <- ESP32 envia "online" / "offline"
+    irrigahome/{deviceId}/commands   -> App envia comandos (irrigar, configurar)
+
+  Callbacks no IrrigaViewModel:
+    onStatusReceived        -> online/offline
+    onUmidSoloReceived      -> umidade do solo (%)
+    onTempReceived          -> temperatura (C)
+    onUmidAmbReceived       -> umidade do ar (%)
+    onNivelAguaReceived     -> nivel da caixa d'agua (string: "Cheio", "Vazio", etc.)
+    onDeviceIdReceived      -> MAC address do dispositivo
+
+  Comandos publicados:
+    publishBomba(ligar: Boolean)              -> liga/desliga bomba
+    publishIrrigationCommand(durationSec)     -> irrigar por N segundos
+    publishSetConfig(mode, threshold,
+      durationSec, cooldownSec)               -> configura modo automatico no ESP32
+
+  Timeout de status: 30 segundos sem mensagem = dispositivo marcado offline
+
+
+6) Telas do App
+----------------
+
+  LoginScreen
+    - Campos: email, senha (modo login) | nome, email, senha, confirmar senha (modo registro)
+    - "Lembrar email" (SharedPreferences)
+    - Validacao de internet antes de tentar autenticar
+    - Fluxo de reset de senha
+    - Dialogs de erro mapeados do Firebase (Portugues)
+
+  PrincipalScreen (Dashboard principal)
+    - Card de status da planta (animado por umidade do solo)
+    - Cards de telemetria: umidade do solo, temperatura, umidade do ar
+    - Card de nivel da caixa d'agua
+    - Botao de irrigacao manual:
+        * Desabilitado: modo automatico, offline, caixa vazia, temperatura alta, cooldown ativo
+        * Exibe: contador regressivo durante irrigacao, contador de cooldown
+        * Dialogo de confirmacao se agendamento dentro de 60 minutos
+    - Menu de configuracoes (ToolsMenuButton): 6 parametros ajustaveis em dialog
+    - Popup de sem internet, popup de conectando ao dispositivo
+    - Card "Nenhum dispositivo vinculado" se nao houver vinculo
+
+  AgendamentoScreen
+    - Seletor de dias da semana (7 botoes circulares)
+    - Seletor de hora (0-23h) e duracao (5/10/15/20 seg)
+    - Lista de ate 4 agendamentos ativos por dispositivo
+    - Delete individual por agendamento
+    - Modal de carregamento e toast de sucesso/erro
+    - Validacao: pelo menos 1 dia selecionado, dispositivo vinculado e autenticado
+
+  HistoricoScreen
+    - Chips de filtro: Todos / Manual / Automatico / Agendado
+    - Filtros rapidos: Hoje / Esta semana / Este mes / Intervalo personalizado
+    - Cards de evento (expansivel): data/hora, duracao, tipo de gatilho,
+      telemetria no momento, indicador de sucesso/falha, motivo de parada
+    - Exclusao de evento individual
+    - Suporte a atualizacao em tempo real (listener Firestore)
+
+
+7) Utilitarios
+--------------
+  ScheduleConflictDetector
+    - Detecta se irrigacao manual conflita com agendamento nos proximos 60 minutos
+    - Leva em conta dia da semana e rollover semanal
+    - Retorna ConflictCheckResult (NoConflict ou ConflictDetected com detalhes)
+
+  SessionManager + AppLifecycleObserver
+    - Auto-logout se app ficar em background por mais de 30 segundos
+    - Registrado como ProcessLifecycleOwner via IrrigaHomeApp
+
+  CooldownDebugHelper
+    - Utilitario de debug: inspecionar/limpar/simular cooldown e dump de preferencias
+
+
+8) Dependencias principais (app/build.gradle.kts)
+--------------------------------------------------
+  Hilt                  2.59.2  (hilt-android + hilt-navigation-compose 1.2.0)
+  KSP                   2.2.10-2.0.2
+  Firebase BOM          32.7.0  (auth-ktx, firestore-ktx)
+  Jetpack Compose BOM   2024.09.00
+  Lifecycle ViewModel   2.10.0  (lifecycle-viewmodel-compose)
+  Eclipse Paho MQTT     1.2.5
+  Kotlin                (via BOM Compose)
+  Java target           11
+
+
+9) Como o sistema funciona (fluxo de alto nivel)
+-------------------------------------------------
+  Irrigacao Manual:
+    1. Usuario toca o botao na PrincipalScreen
+    2. ScheduleConflictDetector verifica agendamentos nos proximos 60 min
+    3. Se conflito: exibe ManualIrrigationConflictDialog
+    4. Confirmado: MqttManager publica comando ao ESP32 com duracao
+    5. ViewModel inicia timer regressivo; ao fim, inicia cooldown
+    6. ESP32 aciona bomba, coleta telemetria e registra evento no Firestore
+
+  Irrigacao Automatica:
+    1. ESP32 envia leitura de solo via MQTT
+    2. IrrigaViewModel.evaluateAutomaticIrrigation() compara com limiar configurado
+    3. Se umidade < limiar E online E caixa cheia E sem cooldown -> publica comando
+    4. Evento registrado no Firestore com triggerType = AUTOMATIC
+
+  Irrigacao por Agendamento:
+    1. Usuario cria agendamento na AgendamentoScreen
+    2. Salvo em Firestore (/schedules/{deviceId}/schedule_0x/{id})
+    3. Firmware consulta Firestore ou recebe via MQTT e executa no horario
+    4. Evento registrado com triggerType = SCHEDULE
+    5. HistoricoViewModel atualiza lista em tempo real via listener
+
+  Login e Vinculo de Dispositivo:
+    1. Autenticacao Firebase -> sessao valida
+    2. IrrigaViewModel.syncLinkedDeviceState() lista IDs de dispositivos do usuario
+    3. MqttManager conecta ao broker e assina topicos do dispositivo
+    4. Ao receber onDeviceIdReceived (MAC), valida proprietario no Firestore
+    5. DeviceValidationState: Loading -> Linked (ou Blocked se nao autorizado)
+
+
+10) O que ajustar para colocar em funcionamento
+------------------------------------------------
+  A) Ambiente
+    - Android Studio atualizado (SDK alvo do app)
+    - Java/JDK compativel com Gradle
+    - Node.js LTS (para irrigahome-functions/)
+    - Arduino IDE ou PlatformIO com suporte ESP32
+
+  B) Configuracoes obrigatorias
+    - local.properties: caminho do SDK Android
+    - app/google-services.json: projeto Firebase valido
+    - MqttManager.kt: substituir credenciais do broker por variaveis de ambiente
+    - Firmware config.h: SSID, senha, broker MQTT, topicos, pinos
+
+  C) Backend (Cloud Functions)
+    - cd irrigahome-functions && npm install
+    - cd irrigahome-functions/functions && npm install
+    - firebase login && firebase use <project-id>
+    - firebase deploy --only functions
+
+  D) Validacao minima
+    - App autentica e exibe tela principal
+    - Dispositivo aparece como online ao ligar ESP32
+    - Telemetria de sensores atualiza na UI
+    - Botao de irrigacao aciona ESP32 e exibe timer
+    - Evento aparece no historico apos irrigacao
+    - Agendamento e salvo e listado corretamente
+
+
+11) Recomendacoes de melhoria futura
+-------------------------------------
+  - Migrar credenciais MQTT (broker, usuario, senha) para BuildConfig / arquivo nao versionado
+  - Adicionar Room Database para cache offline do historico
+  - Implementar DataStore em vez de SharedPreferences para settings
+  - Criar README na raiz com setup passo a passo
+  - Adicionar testes unitarios para ScheduleConflictDetector e ViewModels
+  - Versionar exemplos de configuracao de hardware (pinos e sensores suportados)
+
+
+8) Observacao final
+-------------------
+Com os codigos atuais, o projeto ja apresenta uma base consistente para operacao.
+Para tornar a execucao reproduzivel por qualquer usuario, o ponto mais critico e
+padronizar configuracoes (Firebase, credenciais, IDs e hardware) com documentacao
+unificada e checklist de validacao de ponta a ponta.
+
+
+9) Funcionalidades implementadas ate agora
+-----------------------------------------
+
+A. App Android: autenticacao, sessao e acesso ao sistema
+- Auto-login na inicializacao com Firebase Auth.
+- Logout com confirmacao, limpeza de estado local e retorno para a tela de login.
+- Reset de sessao ao trocar de usuario, evitando vazamento de dados entre contas.
+- Fluxo de validacao separado entre:
+  - autenticacao do usuario;
+  - consulta ao Firestore para verificar se existe IoT vinculado por `macAddress`.
+- Durante a validacao, a tela de login mantém apenas o modal de validacao do usuario.
+- Se o usuario nao tiver `macAddress` vinculado, o acesso ao sistema e bloqueado.
+- Se o usuario tiver `macAddress` vinculado, o acesso ao sistema e liberado normalmente.
+- Regras de erro permanecem separadas para:
+  - e-mail/senha invalidos;
+  - usuario nao cadastrado;
+  - falhas gerais de autenticacao.
+
+B. App Android: vinculacao de device e isolamento de dados
+- O device do usuario passa a ser descoberto pela subcolecao `users/{uid}/devices`.
+- Documentos sem `macAddress` nao sao tratados como device real.
+- O app nao conecta MQTT quando nao ha device vinculado.
+- Telemetria, agendamentos e historico ficam ocultos/bloqueados para usuarios sem vinculo real.
+- O identificador do device e exibido no formato de MAC legivel no app.
+- Os cards de historico nao exibem mais `ownerUid`.
+- O estado do device e da sessao e reidratado ao refazer login apos logout.
+
+C. App Android: irrigacao manual e automatica
+- O comando de irrigacao manual continua suportado pela interface.
+- O acionamento automatico permanece baseado nas regras de umidade, nivel de agua, temperatura e cooldown.
+- O comando de irrigacao agora carrega `deviceId` e `macAddress` no payload MQTT.
+- O app publica comandos apenas no topico do device vinculado.
+- O tempo de acionamento segue o valor enviado no payload e respeita a duracao configurada.
+
+D. Historico e agendamentos
+- Historico migrado para estrutura por device:
+  - `irrigationHistory/{deviceId}/events/{eventId}`
+- Agendamentos migrados para estrutura por device:
+  - `schedules/{deviceId}/schedule_01..04/{scheduleId}`
+- Leitura e exibicao de historico e agendamentos filtradas pelo device vinculado do usuario.
+- Regras de Firestore ajustadas para a nova estrutura durante os testes.
+- Cloud Functions alinhadas ao novo modelo por device.
+- Publicacao de eventos de agenda e historico passou a respeitar o `deviceId` correto.
+
+E. Cloud Functions e backend Firebase
+- Funcoes de leitura e processamento de historico e agendas adaptadas ao modelo por device.
+- Publicacao MQTT de eventos de agenda direcionada ao topico do device correto.
+- Deploy das Functions executado com sucesso.
+- Deploy das regras do Firestore executado com sucesso.
+
+F. Firmware ESP32: MQTT, atuacao e seguranca
+- Conexao MQTT em topicos por device:
+  - `irrigahome/{deviceId}/telemetry`
+  - `irrigahome/{deviceId}/status`
+  - `irrigahome/{deviceId}/commands`
+- Comandos MQTT validados pelo MAC do irrigador antes de acionar bomba/atuador.
+- Payload de comando validado por `deviceId` e `macAddress`.
+- O firmware ignora comandos destinados a outro device.
+- O tempo de acionamento da bomba respeita o `duration` recebido.
+- Agendamentos recebidos por MQTT sao filtrados pelo device correto antes de serem aplicados.
+- O firmware registra eventos de irrigacao com duracao, trigger e telemetria associada.
+- Melhorias para reduzir resets durante a conexao MQTT:
+  - timeout e stack maiores na task de conexao;
+  - envio pendente de status fora do callback;
+  - protecao contra reentrada na task de conexao.
+
+G. Firmware ESP32: interface web de manutencao
+- Tela de manutencao com botao de sair discreto e modal de confirmacao.
+- Endpoint de logout local para limpar estado em memoria.
+- Reset de agendas na interface de manutencao.
+
+H. Sensor e configuracao de hardware
+- Sensor alterado de DHT11 para DHT22.
+- Configuracoes do hardware e dos pinos continuam centralizadas em `config.h` e arquivos de manager.
+
+I. Validacoes ja realizadas
+- Compilacao do app Android em debug passou com sucesso.
+- Sintaxe e deploy das Functions foram validados com sucesso.
+- O fluxo de MQTT e validacao por device foi revisado no app e no firmware.
+
+Arquivos principais envolvidos recentemente:
+- app/src/main/java/com/nr/irrigahome/MainActivity.kt
+- app/src/main/java/com/nr/irrigahome/LoginScreen.kt
+- app/src/main/java/com/nr/irrigahome/AuthViewModel.kt
+- app/src/main/java/com/nr/irrigahome/IrrigaViewModel.kt
+- app/src/main/java/com/nr/irrigahome/DeviceRepository.kt
+- app/src/main/java/com/nr/irrigahome/Historico.kt
+- app/src/main/java/com/nr/irrigahome/MqttManager.kt
+- app/src/main/java/com/nr/irrigahome/IrrigationHistoryRepository.kt
+- app/src/main/java/com/nr/irrigahome/IrrigationScheduleRepository.kt
+- irrigahome-functions/functions/index.js
+- irrigahome-functions/firestore.rules
+- Esp32 Firmware - Irriga Home/main/mqtt_manager.cpp
+- Esp32 Firmware - Irriga Home/main/web_server_manager.cpp
+- Esp32 Firmware - Irriga Home/main/config.h
+
+Observacao final:
+- O projeto agora usa `macAddress` como referencia principal de vinculo do device,
+  isolamento de dados e autorizacao dos comandos de irrigacao.
+- Isso reduz o risco de um device errado receber comandos ou de um usuario sem
+  IoT vinculado enxergar telemetria, agendamentos e historico indevidos.
+
+10) Novas implementacoes e melhorias (firmware e app)
+---------------------------------------------------
+
+- Firmware ESP32:
+  - Correcoes em `mqtt_manager`: mitigacao de corrupcao de heap e deadlocks; aumento
+    de stack na task de conexao e uso de mutex para proteger operacoes críticas
+    (ver MQTT_HEAP_CORRUPTION_FIX.md e DEADLOCK_FIX.md).
+  - `web_server_manager` rodando como task separada; `maintenance-page.html` com
+    endpoints de manutencao (logout, reset de agendas) para debug e configuracao local.
+  - `flow_meter_manager`: leituras de vazao, calibracao e log de eventos; inicializacao
+    validada no `main.ino`.
+  - `actuator_manager`: persistencia de agendamentos, validacao de payloads por
+    `deviceId`/`macAddress`, protecoes contra reentrancia durante acionamentos.
+  - `irrigation_event_manager`: registro robusto de eventos de irrigacao (inicio/fim,
+    duracao, motivo de parada e telemetria associada).
+  - `wifi_manager`: reconexao automatica, sincronizacao NTP e outras medidas para
+    reduzir resets/instabilidade de conexao.
+  - `firmware_logger`: logging estruturado para facilitar analise de falhas em campo.
+
+- App Android:
+  - Interface em Jetpack Compose com telas principais: Principal, Agendamento, Historico
+    e fluxo de autenticacao integrado a Firebase Auth.
+  - Vinculacao de device por `macAddress` e bloqueio de acesso a funcoes de IoT para
+    usuarios sem dispositivo atrelado. Reidrata sessao e estado do device no login.
+  - Agendamentos: CRUD via UI, persistencia em Firestore por device (`schedules/{deviceId}`),
+    limite de 4 agendamentos por device e funcao pronta para publicar payload MQTT
+    (stubs/test prints prontos para conexao MQTT real).
+  - Historico: leitura/observacao de eventos por device em Firestore; integracao com
+    Cloud Functions para consolidacao e processamento de eventos.
+  - Repositorios e use-cases centralizados (`DeviceRepository`, `IrrigationHistoryRepository`),
+    helpers de debug (ex.: `CooldownDebugHelper`) e melhorias de UX nas telas de agendamento.
+
+- Validacoes e deploy:
+  - Compilacao do app em debug validada localmente.
+  - Deploy e validacao das Cloud Functions e regras do Firestore confirmados.
+
+- Proximos passos recomendados:
+  - Testes de integracao ponta-a-ponta (app <-> MQTT broker <-> ESP32) em ambiente real.
+  - Criar README de setup unificado com checklist (Firebase, credenciais, pinos e deploy).
+  - Adicionar monitoramento/alertas basicos (logs remotos, notificacoes de falha de conexao).
+
+-- Fim das novas implementacoes

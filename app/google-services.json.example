@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "SEU_PROJECT_NUMBER",
+    "project_id": "SEU_PROJECT_ID",
+    "storage_bucket": "SEU_PROJECT_ID.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:SEU_PROJECT_NUMBER:android:SEU_APP_ID",
+        "android_client_info": {
+          "package_name": "com.nr.irrigahome"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "SUA_FIREBASE_API_KEY"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

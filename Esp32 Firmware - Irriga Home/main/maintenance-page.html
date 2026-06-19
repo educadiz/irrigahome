@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Irriga Home — Manutencao</title>
+<style>
+  :root {
+    --primary: #2B6CFF;
+    --card: #F2F4F7;
+    --border: #D7DDE6;
+    --text: #122033;
+    --muted: #3E516C;
+    --shadow: 0 12px 30px rgba(18, 32, 51, .08);
+  }
+
+  * {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+  }
+
+  body {
+    min-height: 100vh;
+    padding: 24px 16px 18px;
+    display: flex;
+    justify-content: center;
+    background: linear-gradient(180deg, #b2e2ba 0%, #ebf5ef 100%);
+    color: var(--text);
+    font: 600 16px/1.35 Roboto, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+
+  .page {
+    width: 100%;
+    max-width: 980px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  header {
+    width: 100%;
+  }
+
+  h1 {
+    text-align: center;
+    font-size: 1.38rem;
+    font-weight: 700;
+    color: #1B5E20;
+    margin-bottom: 4px;
+  }
+
+  .sub {
+    text-align: center;
+    font-size: .8rem;
+    color: var(--muted);
+    margin-bottom: 12px;
+  }
+
+  .cards {
+    width: 100%;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 14px 16px;
+    box-shadow: var(--shadow);
+  }
+
+  .card h2 {
+    text-align: center;
+    margin-bottom: 10px;
+    font-size: .86rem;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: #1B2C41;
+  }
+
+  .row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 30px;
+    margin-bottom: 7px;
+  }
+
+  .label {
+    flex: 1;
+    color: #15263A;
+    font-weight: 600;
+    font-size: .87rem;
+  }
+
+  .value {
+    min-width: 92px;
+    text-align: right;
+    color: var(--primary);
+    font-weight: 700;
+    font-size: .88rem;
+  }
+
+  #live .row {
+    min-height: 26px;
+    margin-bottom: 5px;
+  }
+
+  #live .row:last-child {
+    margin-bottom: 0;
+  }
+
+  input[type=number] {
+    width: 96px;
+    padding: 6px 9px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: #fff;
+    color: var(--text);
+    text-align: center;
+    font-size: .85rem;
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .8);
+  }
+
+  input[type=number]:focus {
+    outline: none;
+    border-color: var(--primary);
+    box-shadow: 0 0 0 3px rgba(43, 108, 255, .12);
+  }
+
+  .unit {
+    min-width: 28px;
+    color: var(--muted);
+    font-size: .78rem;
+    font-weight: 600;
+  }
+
+  .btn {
+    width: 100%;
+    margin-top: 8px;
+    padding: 12px;
+    border: 0;
+    border-radius: 12px;
+    background: var(--primary);
+    color: #fff;
+    font: 700 .94rem/1 Roboto, system-ui, sans-serif;
+  }
+
+  .divider {
+    border: 0;
+    border-top: 1px solid var(--border);
+    margin: 14px 0;
+  }
+
+  .pill {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-size: .76rem;
+    font-weight: 700;
+  }
+
+  .on {
+    background: #E8F7EC;
+    color: #1F7A3A;
+  }
+
+  .off {
+    background: #FDECEC;
+    color: #C63535;
+  }
+
+  footer {
+    width: 100%;
+    text-align: center;
+    color: var(--muted);
+    font-size: .78rem;
+    padding: 4px 0 0;
+  }
+
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    transform: translateX(-50%);
+    padding: 10px 22px;
+    border-radius: 10px;
+    background: #1f8f46;
+    color: #fff;
+    font: 700 .9rem/1 Roboto, system-ui, sans-serif;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .3s;
+  }
+
+  .toast.err {
+    background: #d92d20;
+  }
+
+  .toast.show {
+    opacity: 1;
+  }
+
+  @media (max-width: 820px) {
+    .cards {
+      grid-template-columns: 1fr;
+    }
+
+    .page {
+      max-width: 760px;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <header>
+    <h1>Irriga 🌱 Home</h1>
+    <p class="sub">Console de manutenção e ajustes</p>
+  </header>
+
+  <div class="cards">
+    <section class="card" id="live">
+      <h2>Leituras</h2>
+      <div class="row"><span class="label">Irrigador</span><span class="value" id="lv-irrigador">--</span></div>
+      <div class="row"><span class="label">Umidade do Solo</span><span class="value" id="lv-solo">--</span></div>
+      <div class="row"><span class="label">Temperatura</span><span class="value" id="lv-temp">--</span></div>
+      <div class="row"><span class="label">Umidade do Ar</span><span class="value" id="lv-ar">--</span></div>
+      <div class="row"><span class="label">Nível do reservatório</span><span class="value" id="lv-agua">--</span></div>
+      <div class="row"><span class="label">Bomba de água</span><span class="value" id="lv-bomba">--</span></div>
+      <div class="row"><span class="label">Modo de acionamento</span><span class="value" id="lv-modo">--</span></div>
+    </section>
+
+    <section class="card">
+      <h2>Calibração</h2>
+      <p style="font-size:.8rem;color:var(--muted);margin-bottom:12px;text-align:center">
+        Offsets aplicados na leitura afetam exibição e lógica de controle automático.
+      </p>
+
+      <div class="row">
+        <span class="label">Offset Umidade Solo [-30, 30]</span>
+        <input type="number" id="off-solo" min="-30" max="30" step="1" value="0">
+        <span class="unit">%</span>
+      </div>
+      <div class="row">
+        <span class="label">Offset Temperatura [-10, 10]</span>
+        <input type="number" id="off-temp" min="-10" max="10" step="0.1" value="0.0">
+        <span class="unit">°C</span>
+      </div>
+      <div class="row">
+        <span class="label">Offset Umidade do Ar [-20, 20]</span>
+        <input type="number" id="off-ar" min="-20" max="20" step="0.1" value="0.0">
+        <span class="unit">%</span>
+      </div>
+
+      <hr class="divider">
+      <h2 style="margin-bottom:12px">Calibração do Fluxômetro</h2>
+      <div class="row">
+        <span class="label">Fator [0.1, 5]</span>
+        <input type="number" id="flow-scale" min="0.1" max="5" step="0.0001" value="1.0">
+        <span class="unit"></span>
+      </div>
+      <div class="row">
+        <span class="label">Offset (mL) [-500, 500]</span>
+        <input type="number" id="flow-offset" min="-500" max="500" step="0.1" value="0.0">
+        <span class="unit">mL</span>
+      </div>
+
+      <button class="btn" onclick="salvar()">Salvar Calibração</button>
+    </section>
+  </div>
+
+  <footer>Desenvolvido por CodeWave | 2026</footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+
+const badge = on => on
+  ? '<span class="pill on">ON</span>'
+  : '<span class="pill off">OFF</span>';
+
+function toast(msg, err) {
+  $('toast').textContent = msg;
+  $('toast').className = 'toast show' + (err ? ' err' : '');
+  setTimeout(() => { $('toast').className = 'toast'; }, 3000);
+}
+
+function atualizar() {
+  fetch('/api/data')
+    .then(r => r.json())
+    .then(d => {
+      $('lv-irrigador').textContent = d.deviceId || '--';
+      $('lv-solo').textContent = d.soil + '%';
+      $('lv-temp').textContent = d.temp + '\u00b0C';
+      $('lv-ar').textContent = d.humidity + '%';
+      $('lv-agua').innerHTML = badge(d.water);
+      $('lv-bomba').innerHTML = badge(d.pump);
+      $('lv-modo').textContent = d.mode === 'auto' ? 'Automático' : 'Manual';
+
+      if (!window._loaded) {
+        window._loaded = true;
+        $('off-solo').value = d.offSolo;
+        $('off-temp').value = d.offTemp;
+        $('off-ar').value = d.offAr;
+        $('flow-scale').value = d.flowScale;
+        $('flow-offset').value = d.flowOffsetMl;
+      }
+    })
+    .catch(() => {});
+}
+
+function salvar() {
+  const body = new URLSearchParams({
+    offSolo: $('off-solo').value,
+    offTemp: $('off-temp').value,
+    offAr: $('off-ar').value,
+    flowScale: $('flow-scale').value,
+    flowOffset: $('flow-offset').value
+  });
+
+  fetch('/api/config', { method: 'POST', body })
+    .then(r => r.json())
+    .then(d => toast(d.ok ? 'Calibração salva com sucesso!' : 'Erro ao salvar: ' + d.error, !d.ok))
+    .catch(() => toast('Falha na comunicação com o irrigador', true));
+}
+
+atualizar();
+setInterval(atualizar, 3000);
+</script>
+</body>
+</html>

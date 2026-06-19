@@ -1,0 +1,117 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return isAuthenticated() && request.auth.uid == uid;
+    }
+
+    function deviceDoc(deviceId) {
+      return get(/databases/$(database)/documents/devices/$(deviceId));
+    }
+
+    function userOwnsDevice(deviceId) {
+      return isAuthenticated()
+        && exists(/databases/$(database)/documents/devices/$(deviceId))
+        && deviceDoc(deviceId).data.ownerUid == request.auth.uid;
+    }
+
+    function validDeviceCreatePayload(uid, deviceId) {
+      return request.resource.data.macAddress == deviceId
+        && request.resource.data.ownerUid == uid;
+    }
+
+    // users/{uid}
+    match /users/{uid} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(uid);
+
+      match /devices/{deviceId} {
+        allow read: if isAuthenticated();
+
+        // Placeholder de bootstrap no cadastro
+        allow create, update: if isOwner(uid)
+          && (
+            deviceId == "_placeholder"
+            || (
+              request.resource.data.ownerUid == uid
+              && request.resource.data.macAddress == deviceId
+            )
+          );
+
+        allow delete: if isOwner(uid);
+      }
+    }
+
+    // devices/{macAddress}
+    match /devices/{deviceId} {
+      allow read: if isAuthenticated();
+
+      // Criação apenas para o próprio usuário
+      allow create: if isAuthenticated()
+        && validDeviceCreatePayload(request.auth.uid, deviceId);
+
+      // Atualização/deleção somente pelo dono, sem transferência de propriedade
+      allow update, delete: if isAuthenticated()
+        && resource.data.ownerUid == request.auth.uid
+        && request.resource.data.ownerUid == resource.data.ownerUid;
+    }
+
+    // irrigationHistory/{deviceId} - DURANTE TESTES: liberar acesso completo
+    match /irrigationHistory/{deviceId} {
+      // Permitir leitura/gravacao/delecao para facilitar testes.
+      allow read, write: if true;
+
+      match /{historyCollection}/{historyId} {
+        allow read, write: if true;
+      }
+    }
+
+
+    // Legacy root-level history documents (compatibilidade temporária)
+    match /irrigationHistoryLegacy/{historyId} {
+      allow read: if isAuthenticated()
+        && (
+          (resource.data.ownerUid is string && resource.data.ownerUid == request.auth.uid)
+          || (
+            !(resource.data.ownerUid is string)
+            && (resource.data.deviceId is string)
+            && userOwnsDevice(resource.data.deviceId)
+          )
+        );
+
+      // O app pode não escrever histórico diretamente; se escrever, exige vínculo válido
+      allow create, update: if isAuthenticated()
+        && (
+          (request.resource.data.ownerUid is string && request.resource.data.ownerUid == request.auth.uid)
+          || (
+            !(request.resource.data.ownerUid is string)
+            && (request.resource.data.deviceId is string)
+            && userOwnsDevice(request.resource.data.deviceId)
+          )
+        );
+
+      allow delete: if isAuthenticated()
+        && (
+          (resource.data.ownerUid is string && resource.data.ownerUid == request.auth.uid)
+          || (
+            !(resource.data.ownerUid is string)
+            && (resource.data.deviceId is string)
+            && userOwnsDevice(resource.data.deviceId)
+          )
+        );
+    }
+
+    function validScheduleCollection(scheduleCollection) {
+      return scheduleCollection in ["schedule_01", "schedule_02", "schedule_03", "schedule_04"];
+    }
+
+    // schedules/{deviceId}/{scheduleCollection}/{scheduleId} - DURANTE TESTES: liberar acesso completo
+    match /schedules/{deviceId}/{scheduleCollection}/{scheduleId} {
+      allow read, write: if true;
+    }
+  }
+}

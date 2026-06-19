@@ -1,0 +1,121 @@
+/**
+ * Arquivo: IrrigationHistory.kt
+ *
+ * Responsabilidade:
+ * - Define modelos de dados para o histórico de irrigação
+ * - Implementa data classes para eventos de irrigação do Firestore
+ * - Implementa data classes para eventos de irrigação do endpoint HTTP
+ * - Fornece mapeamento entre formatos de dados
+ * - Padroniza tipos de acionamento: manual, automatic, schedule
+ */
+
+package com.nr.irrigahome
+
+import com.google.firebase.Timestamp
+import java.util.Date
+
+/**
+ * Modelo de dados para eventos de irrigação do Firestore
+ *
+ * @param id Identificador único do evento
+ * @param deviceId ID do dispositivo (ex: "esp32_01")
+ * @param eventId Identificador único global do evento
+ * @param startAt Timestamp de início da irrigação
+ * @param endAt Timestamp de término da irrigação
+ * @param durationSec Duração em segundos
+ * @param trigger Tipo de acionamento: "manual", "automatic", "schedule"
+ * @param temperature Temperatura durante a irrigação (opcional)
+ * @param soilHumidity Umidade do solo (opcional)
+ * @param airHumidity Umidade do ar (opcional)
+ * @param waterLevel Nível de água no reservatório (opcional)
+ */
+data class IrrigationHistoryFirestore(
+    val id: String = "",
+    val deviceId: String = "",
+    val eventId: String = "",
+    val startAt: Timestamp? = null,
+    val endAt: Timestamp? = null,
+    val durationSec: Long = 0L,
+    val trigger: String = "manual",
+    val temperature: Int? = null,        // °C
+    val soilHumidity: Int? = null,        // %
+    val airHumidity: Int? = null,         // %
+    val waterLevel: String? = null        // "Cheio", "Vazio"
+)
+
+/**
+ * Modelo de dados para eventos de irrigação do endpoint HTTP
+ *
+ * @param id Identificador único
+ * @param device ID do dispositivo
+ * @param eventId Identificador único global
+ * @param inicio Data/hora de início (formato ISO ou timestamp)
+ * @param fim Data/hora de término (formato ISO ou timestamp)
+ * @param duracao Duração em segundos
+ * @param trigger Tipo de acionamento
+ */
+data class IrrigationHistoryHttp(
+    val id: String = "",
+    val device: String = "",
+    val eventId: String = "",
+    val inicio: String = "",
+    val fim: String = "",
+    val duracao: Long = 0L,
+    val trigger: String = "manual"
+)
+
+/**
+ * Modelo unificado para apresentação na UI
+ * Consolida dados de Firestore e HTTP em formato único
+ */
+data class IrrigationHistoryEvent(
+    val id: String,
+    val eventId: String,
+    val deviceId: String,
+    val startTime: Date,
+    val endTime: Date,
+    val durationSeconds: Long,
+    val triggerType: TriggerType,
+    val temperature: Int? = null,
+    val soilHumidity: Int? = null,
+    val airHumidity: Int? = null,
+    val waterLevel: String? = null
+) {
+    // Propriedades calculadas
+    val durationMinutes: Long
+        get() = durationSeconds / 60
+    val durationSecondsRemainder: Long
+        get() = durationSeconds % 60
+}
+
+/**
+ * Enum para tipos de acionamento
+ */
+enum class TriggerType(val displayName: String) {
+    MANUAL("Manual"),
+    AUTOMATIC("Automático"),
+    SCHEDULE("Agendado"),
+    UNKNOWN("Desconhecido");
+
+    companion object {
+        fun fromString(value: String): TriggerType {
+            return when (value.lowercase()) {
+                "manual" -> MANUAL
+                "automatic", "automatico" -> AUTOMATIC
+                "schedule", "agendado" -> SCHEDULE
+                else -> UNKNOWN
+            }
+        }
+    }
+}
+
+/**
+ * Estado de carregamento para a UI
+ */
+sealed class HistoryLoadingState {
+    object Loading : HistoryLoadingState()
+    data class Success(val events: List<IrrigationHistoryEvent>) : HistoryLoadingState()
+    data class Error(val exception: Throwable, val message: String) : HistoryLoadingState()
+    object Empty : HistoryLoadingState()
+}
+

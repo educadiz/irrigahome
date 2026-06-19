@@ -1,0 +1,14 @@
+# =============================================================================
+# local.properties.example — Modelo de credenciais para o app Android
+# =============================================================================
+# Copie este arquivo para local.properties e preencha com seus valores reais.
+# NÃO edite este arquivo com dados reais — ele é commitado no repositório.
+# =============================================================================
+
+# SDK Android (gerado pelo Android Studio)
+sdk.dir=/caminho/para/Android/Sdk
+
+# MQTT (HiveMQ Cloud)
+mqtt.brokerUrl=ssl://SEU_BROKER.s1.eu.hivemq.cloud:8883
+mqtt.username=SEU_USUARIO_MQTT
+mqtt.password=SUA_SENHA_MQTT
