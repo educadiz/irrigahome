@@ -111,7 +111,7 @@ public:
 private:
     ActiveIrrigationState activeState;
     IrrigationEvent eventQueue[MAX_IRRIGATION_QUEUE];
-    static const int MAX_IRRIGATION_HISTORY = 20;
+    static const int MAX_IRRIGATION_HISTORY = 10;
     IrrigationHistoryEntry historyBuffer[MAX_IRRIGATION_HISTORY];
     int historyCount;
 

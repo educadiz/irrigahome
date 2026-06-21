@@ -272,6 +272,12 @@ int ActuatorManager::getScheduleCount() {
     return countUsedSchedules(schedules, MAX_SCHEDULES);
 }
 
+const char* ActuatorManager::getScheduleId(int index) const {
+    if (index < 0 || index >= MAX_SCHEDULES) return nullptr;
+    if (!schedules[index].used) return nullptr;
+    return schedules[index].id;
+}
+
 void ActuatorManager::clearSchedules() {
     for (int i = 0; i < MAX_SCHEDULES; i++) {
         schedules[i] = IrrigationSchedule();

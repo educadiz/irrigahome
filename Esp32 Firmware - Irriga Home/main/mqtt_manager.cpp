@@ -142,6 +142,47 @@ struct FirebaseEventPayload {
 
 static QueueHandle_t firebaseQueue = nullptr;
 
+// ==================== SINCRONIZACAO DE AGENDAMENTOS ====================
+// Fila de sinal para a syncTask: tamanho 1, sem dados (apenas gatilho).
+// A task verifica _scheduleSyncRunning antes de iniciar para evitar dupla execução.
+static QueueHandle_t scheduleSyncQueue = nullptr;
+
+// Ponteiro global para o MqttManager (sincronismo de flags entre cores).
+// Já existia como mqttManagerInstance; usamos aqui via cast para acessar membros.
+
+static void scheduleSyncTask(void* pvParameters) {
+    for (;;) {
+        uint8_t trigger = 0;
+        if (xQueueReceive(scheduleSyncQueue, &trigger, portMAX_DELAY) != pdTRUE) {
+            continue;
+        }
+
+        if (!mqttManagerInstance) {
+            continue;
+        }
+
+        mqttManagerInstance->syncSchedulesFromFirestore();
+    }
+}
+
+// Estrutura que representa um agendamento retornado pelo endpoint getDeviceSchedules.
+// Campos mantidos simples para não depender de biblioteca JSON no firmware.
+struct FirestoreScheduleEntry {
+    char id[64];
+    bool ativo;
+    uint8_t diasMask;
+    int hour;
+    int minute;
+    int durationSeconds;
+    char createdAt[32];
+};
+
+// Tamanho máximo de agendamentos que o endpoint pode retornar.
+// Pode ser maior que MAX_SCHEDULES; apenas os primeiros MAX_SCHEDULES serão aplicados.
+static const int MAX_FIRESTORE_SCHEDULES = 16;
+
+// ==================== FIM SINCRONIZACAO ====================
+
 // Task dedicada ao envio HTTP para o Firebase.
 // Roda no Core 0 (protocolo), separado do loop principal (Core 1),
 // com stack generosa para TLS + HTTPClient.
@@ -335,6 +376,286 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
         fwLogLine("WARN", "FIREBASE", "Fila cheia; evento descartado");
     }
 }
+
+// ==================== SINCRONIZACAO DE AGENDAMENTOS ====================
+
+// Helpers de parse mínimos para o JSON retornado pelo endpoint getDeviceSchedules.
+// Evita dependência de biblioteca JSON no firmware.
+
+static bool syncParseString(const char* json, int jsonLen, const char* key, char* outBuf, int outBufLen) {
+    // Busca "key":"valor"
+    char token[72];
+    snprintf(token, sizeof(token), "\"%s\":\"", key);
+    const char* pos = strstr(json, token);
+    if (!pos) return false;
+    pos += strlen(token);
+    int i = 0;
+    while (pos[i] != '"' && pos[i] != '\0' && i < (outBufLen - 1)) {
+        outBuf[i] = pos[i];
+        i++;
+    }
+    outBuf[i] = '\0';
+    return i > 0;
+}
+
+static bool syncParseBool(const char* json, const char* key, bool* outVal) {
+    char token[72];
+    snprintf(token, sizeof(token), "\"%s\":", key);
+    const char* pos = strstr(json, token);
+    if (!pos) return false;
+    pos += strlen(token);
+    while (*pos == ' ') pos++;
+    if (strncmp(pos, "true", 4) == 0)  { *outVal = true;  return true; }
+    if (strncmp(pos, "false", 5) == 0) { *outVal = false; return true; }
+    return false;
+}
+
+static bool syncParseInt(const char* json, const char* key, int* outVal) {
+    char token[72];
+    snprintf(token, sizeof(token), "\"%s\":", key);
+    const char* pos = strstr(json, token);
+    if (!pos) return false;
+    pos += strlen(token);
+    while (*pos == ' ' || *pos == '"') pos++;
+    if (*pos == '\0') return false;
+    char* end = nullptr;
+    long val = strtol(pos, &end, 10);
+    if (end == pos) return false;
+    *outVal = (int)val;
+    return true;
+}
+
+// Converte array JSON de inteiros de diasSemana (ex: [1,3,5]) em bitmask 0..6
+// onde bit 0 = domingo, bit 1 = segunda, ... bit 6 = sábado.
+// Convenção Firestore: 1=domingo, 2=segunda, ..., 7=sábado.
+static uint8_t syncParseDiasMask(const char* json) {
+    const char* keyPos = strstr(json, "\"diasSemana\":");
+    if (!keyPos) return 0;
+    const char* bracket = strchr(keyPos, '[');
+    if (!bracket) return 0;
+    uint8_t mask = 0;
+    const char* p = bracket + 1;
+    while (*p && *p != ']') {
+        if (*p >= '0' && *p <= '9') {
+            int val = (int)strtol(p, nullptr, 10);
+            // Firestore: 1=domingo...7=sábado → firmware: 0=domingo...6=sábado
+            if (val >= 1 && val <= 7) mask |= (1U << (val - 1));
+        }
+        while (*p && *p != ',' && *p != ']') p++;
+        if (*p == ',') p++;
+    }
+    return mask;
+}
+
+// Extrai a próxima substring de objeto JSON {...} a partir de `start`.
+// Retorna ponteiro para o início e preenche *outLen com o tamanho do objeto.
+static const char* syncNextObject(const char* start, int* outLen) {
+    const char* p = start;
+    while (*p && *p != '{') p++;
+    if (!*p) return nullptr;
+    const char* begin = p;
+    int depth = 0;
+    bool inStr = false;
+    char prev = 0;
+    while (*p) {
+        if (!inStr) {
+            if (*p == '{') depth++;
+            else if (*p == '}') { depth--; if (depth == 0) { *outLen = (int)(p - begin + 1); return begin; } }
+            else if (*p == '"') inStr = true;
+        } else {
+            if (*p == '"' && prev != '\\') inStr = false;
+        }
+        prev = *p;
+        p++;
+    }
+    return nullptr;
+}
+
+// Parseia o JSON retornado pelo endpoint getDeviceSchedules.
+// Formato esperado: {"schedules":[{...},{...},...]}
+// Preenche outEntries (array pré-alocado de tamanho maxEntries).
+// Retorna quantidade de entradas parseadas.
+static int syncParseSchedulesJson(const char* json, int jsonLen, FirestoreScheduleEntry* outEntries, int maxEntries) {
+    if (!json || jsonLen <= 0 || !outEntries || maxEntries <= 0) return 0;
+
+    // Localiza array "schedules":[...]
+    const char* arrayKey = strstr(json, "\"schedules\":");
+    if (!arrayKey) return 0;
+    const char* bracket = strchr(arrayKey, '[');
+    if (!bracket) return 0;
+
+    int count = 0;
+    const char* p = bracket + 1;
+
+    while (count < maxEntries) {
+        int objLen = 0;
+        const char* obj = syncNextObject(p, &objLen);
+        if (!obj) break;
+
+        FirestoreScheduleEntry& e = outEntries[count];
+        memset(&e, 0, sizeof(e));
+
+        // id
+        if (!syncParseString(obj, objLen, "id", e.id, sizeof(e.id))) {
+            p = obj + objLen;
+            continue;
+        }
+
+        // horaAcionamento "HH:MM"
+        char hora[16] = {0};
+        if (!syncParseString(obj, objLen, "horaAcionamento", hora, sizeof(hora))) {
+            // fallback: "hora"
+            syncParseString(obj, objLen, "hora", hora, sizeof(hora));
+        }
+        // parse HH:MM
+        int h = 0, m = 0;
+        if (sscanf(hora, "%d:%d", &h, &m) == 2 && h >= 0 && h <= 23 && m >= 0 && m <= 59) {
+            e.hour = h;
+            e.minute = m;
+        } else {
+            p = obj + objLen;
+            continue; // hora inválida: pula
+        }
+
+        // tempoAcionamento
+        int dur = 0;
+        if (!syncParseInt(obj, "tempoAcionamento", &dur)) {
+            syncParseInt(obj, "duracaoSegundos", &dur);
+        }
+        if (dur <= 0) { p = obj + objLen; continue; }
+        if (dur > DURACAO_IRRIGACAO_MAXIMA) dur = DURACAO_IRRIGACAO_MAXIMA;
+        e.durationSeconds = dur;
+
+        // ativo
+        bool ativo = false;
+        syncParseBool(obj, "ativo", &ativo);
+        e.ativo = ativo;
+
+        // diasSemana
+        e.diasMask = syncParseDiasMask(obj);
+
+        // createdAt (opcional)
+        syncParseString(obj, objLen, "createdAt", e.createdAt, sizeof(e.createdAt));
+
+        count++;
+        p = obj + objLen;
+    }
+
+    return count;
+}
+
+// Executa a reconciliação: busca os agendamentos do Firestore via HTTP e aplica o diff na NVS.
+// Deve ser chamado a partir de uma task no Core 0 (nunca diretamente no loop principal).
+void MqttManager::syncSchedulesFromFirestore() {
+    if (_scheduleSyncRunning) {
+        fwLogLine("INFO", "SYNC", "Sync ja em andamento; ignorando disparo duplo");
+        return;
+    }
+    _scheduleSyncRunning = true;
+    _scheduleSyncPending = false;
+
+    if (WiFi.status() != WL_CONNECTED) {
+        fwLogLine("WARN", "SYNC", "Sem Wi-Fi; sync adiado");
+        _scheduleSyncRunning = false;
+        return;
+    }
+
+    char url[256];
+    snprintf(url, sizeof(url), "%s/getDeviceSchedules?deviceId=%s", FIREBASE_PROJECT_URL, cachedDeviceId);
+
+    fwLogf("INFO", "SYNC", "Buscando agendamentos: %s", url);
+
+    WiFiClientSecure httpsClient;
+    httpsClient.setInsecure();
+    httpsClient.setTimeout(10);
+
+    HTTPClient http;
+    http.begin(httpsClient, url);
+    http.setTimeout(8000);
+
+    int httpCode = http.GET();
+
+    if (httpCode != 200) {
+        fwLogf("WARN", "SYNC", "HTTP %d ao buscar agendamentos; sync cancelado", httpCode);
+        http.end();
+        _scheduleSyncRunning = false;
+        return;
+    }
+
+    String body = http.getString();
+    http.end();
+
+    if (body.length() == 0) {
+        fwLogLine("WARN", "SYNC", "Resposta vazia; sync cancelado");
+        _scheduleSyncRunning = false;
+        return;
+    }
+
+    // Parseia os agendamentos retornados pelo Firestore
+    FirestoreScheduleEntry firestoreSchedules[MAX_FIRESTORE_SCHEDULES];
+    int firestoreCount = syncParseSchedulesJson(body.c_str(), (int)body.length(), firestoreSchedules, MAX_FIRESTORE_SCHEDULES);
+
+    fwLogf("INFO", "SYNC", "Firestore retornou %d agendamento(s)", firestoreCount);
+
+    // ---- PASSO 1: Remove da NVS agendamentos que NÃO existem mais no Firestore ----
+    // Coletamos os IDs a remover antes de entrar na seção crítica para manter o bloco curto.
+    // A NVS é escrita fora do critical (writeBytes é lenta), apenas o array em RAM é protegido.
+    char idsToRemove[4][64] = {};
+    int removeCount = 0;
+
+    taskENTER_CRITICAL(&mqttConnectMux);
+    for (int i = 0; i < atuador.getMaxSchedules() && removeCount < 4; i++) {
+        const char* nvsId = atuador.getScheduleId(i);
+        if (nvsId == nullptr) continue;
+
+        bool foundInFirestore = false;
+        for (int j = 0; j < firestoreCount; j++) {
+            if (strcmp(firestoreSchedules[j].id, nvsId) == 0) {
+                foundInFirestore = true;
+                break;
+            }
+        }
+        if (!foundInFirestore) {
+            strncpy(idsToRemove[removeCount++], nvsId, 63);
+        }
+    }
+    taskEXIT_CRITICAL(&mqttConnectMux);
+
+    for (int k = 0; k < removeCount; k++) {
+        fwLogf("INFO", "SYNC", "Removendo da NVS (ausente no Firestore): %s", idsToRemove[k]);
+        atuador.removeSchedule(idsToRemove[k]);
+    }
+
+    // ---- PASSO 2: Upsert de todos os agendamentos do Firestore na NVS ----
+    // upsertSchedule é idempotente: não altera lastTriggerAt, apenas atualiza campos.
+    int upserted = 0;
+    int rejected = 0;
+    for (int j = 0; j < firestoreCount; j++) {
+        const FirestoreScheduleEntry& fe = firestoreSchedules[j];
+        bool ok = atuador.upsertSchedule(
+            fe.id,
+            fe.ativo,
+            fe.diasMask,
+            fe.hour,
+            fe.minute,
+            fe.durationSeconds,
+            fe.createdAt[0] != '\0' ? fe.createdAt : nullptr
+        );
+        if (ok) {
+            upserted++;
+        } else {
+            rejected++;
+            fwLogf("WARN", "SYNC", "Slot cheio; agendamento rejeitado: %s", fe.id);
+        }
+    }
+
+    fwLogf("INFO", "SYNC", "Sync concluido: %d upserted, %d rejected. NVS agora tem %d agendamento(s)",
+           upserted, rejected, atuador.getScheduleCount());
+
+    _scheduleSyncRunning = false;
+}
+
+// ==================== FIM SINCRONIZACAO DE AGENDAMENTOS ====================
 
 // ==================== HELPERS DE PARSE ====================
 
@@ -1385,6 +1706,13 @@ void MqttManager::begin(IrrigationEventManager& eventMgr) {
         return;
     }
 
+    // Fila de sinal para sincronização de agendamentos (tamanho 1 — apenas gatilho).
+    scheduleSyncQueue = xQueueCreate(1, sizeof(uint8_t));
+    if (scheduleSyncQueue == nullptr) {
+        fwLogLine("ERROR", "SYNC", "Falha ao criar fila de sync FreeRTOS");
+        return;
+    }
+
     // Cria a task no Core 0 (protocolo/rede). Mantida separada do loopTask (Core 1)
     // para que operações bloqueantes de TLS/HTTPClient não atrasem o loop principal.
     // Stack de 20 KB acomoda HTTPClient + WiFiClientSecure sem risco de overflow.
@@ -1402,6 +1730,24 @@ void MqttManager::begin(IrrigationEventManager& eventMgr) {
         fwLogLine("ERROR", "FIREBASE", "Falha ao criar task FreeRTOS");
     } else {
         fwLogLine("INFO", "FIREBASE", "Task HTTP iniciada no Core 0 (stack=20KB)");
+    }
+
+    // Task de sincronização de agendamentos: aguarda sinal na fila e executa HTTP.
+    // Stack 20 KB: mesma base da firebaseTask (TLS + HTTPClient).
+    BaseType_t syncResult = xTaskCreatePinnedToCore(
+        scheduleSyncTask,  // funcao da task
+        "scheduleSync",    // nome para debug
+        20480,             // stack em bytes (20 KB)
+        nullptr,
+        1,
+        nullptr,
+        0  // core 0
+    );
+
+    if (syncResult != pdPASS) {
+        fwLogLine("ERROR", "SYNC", "Falha ao criar task de sync de agendamentos");
+    } else {
+        fwLogLine("INFO", "SYNC", "Task scheduleSync iniciada no Core 0 (stack=20KB)");
     }
 }
 
@@ -1465,6 +1811,15 @@ void MqttManager::loop() {
         candidateUmidAr = -1000;
         mqttWasConnected      = true;
         reconnectBackoffMs    = 5000UL;
+
+        // Disparar sincronização de agendamentos após reconexão.
+        // A scheduleSyncTask (Core 0) faz o HTTP e reconcilia a NVS sem bloquear o loop.
+        if (scheduleSyncQueue != nullptr && !_scheduleSyncRunning) {
+            uint8_t trigger = 1;
+            _scheduleSyncPending = true;
+            xQueueOverwrite(scheduleSyncQueue, &trigger);
+            fwLogLine("INFO", "SYNC", "Sincronizacao de agendamentos disparada apos reconexao MQTT");
+        }
     }
 
     // Pular client.loop() se uma conexão está em andamento (Core 0 em client.connect()).

@@ -29,9 +29,9 @@ public:
     void  setOffsetTemperatura(float offset);
     float getOffsetTemperatura() const;
 
-    // Solo: offset em pontos percentuais (ex.: +5 eleva leitura de 40% para 45%)
-    void setOffsetUmidadeSolo(int offset);
-    int  getOffsetUmidadeSolo() const;
+    // Solo: offset em pontos percentuais com precisao de 0.1 (ex.: +2.5 eleva leitura de 40.0% para 42.5%)
+    void  setOffsetUmidadeSolo(float offset);
+    float getOffsetUmidadeSolo() const;
 
     void  setOffsetUmidadeAr(float offset);
     float getOffsetUmidadeAr() const;
@@ -52,7 +52,7 @@ private:
 
     // Offsets em RAM (carregados da NVS em begin())
     float _offsetTemperatura = 0.0f;
-    int   _offsetUmidadeSolo = 0;
+    float _offsetUmidadeSolo = 0.0f;
     float _offsetUmidadeAr   = 0.0f;
 
     // Flag de escrita NVS pendente — limpo por flushOffsets()

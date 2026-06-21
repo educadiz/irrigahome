@@ -40,7 +40,7 @@ private:
     struct PendingConfig {
         volatile bool pending = false;
         float offTemp    = 0.0f;
-        int   offSolo    = 0;
+        float offSolo    = 0.0f;
         float offUmidAr  = 0.0f;
         float flowScale  = 1.0f;
         float flowOffset = 0.0f;

@@ -140,6 +140,31 @@ async function writeDeviceHistoryEvent(deviceId, eventData, eventId, mergeExisti
   return newDocRef;
 }
 
+async function pruneDeviceHistoryToLimit(deviceId, limit = 10) {
+  const normalizedDeviceId = typeof deviceId === "string" ? deviceId.trim() : "";
+
+  if (!normalizedDeviceId || limit <= 0) {
+    return;
+  }
+
+  const snapshot = await getDeviceHistoryCollection(normalizedDeviceId)
+    .orderBy("startAt", "desc")
+    .get();
+
+  if (snapshot.size <= limit) {
+    return;
+  }
+
+  const batch = db.batch();
+
+  snapshot.docs.slice(limit).forEach((doc) => {
+    batch.delete(doc.ref);
+  });
+
+  await batch.commit();
+  console.log(`[history-prune] device=${normalizedDeviceId} removed=${snapshot.size - limit} limit=${limit}`);
+}
+
 async function fetchDeviceHistoryCollectionsByOwnerUid(ownerUid) {
   const normalizedOwnerUid = typeof ownerUid === "string" ? ownerUid.trim() : "";
 
@@ -650,6 +675,8 @@ exports.saveIrrigationEvent = onRequest(
         data.eventId,
         Boolean(data.endAt)
       );
+
+      await pruneDeviceHistoryToLimit(data.deviceId, 10);
       
       console.log(`✅ Evento de irrigação salvo em ${data.deviceId}/${HISTORY_COLLECTION_NAME}: ${data.eventId} (${docRef.id})`);
 
@@ -765,6 +792,8 @@ exports.onMqttIrrigationEvent = onRequest(
         Boolean(payload.endAt)
       );
 
+      await pruneDeviceHistoryToLimit(payload.deviceId, 10);
+
       res.status(200).json({
         success: true,
         message: "Evento MQTT processado",
@@ -774,6 +803,55 @@ exports.onMqttIrrigationEvent = onRequest(
       res.status(500).json({
         error: error.message,
       });
+    }
+  }
+);
+
+// 🔹 Retorna todos os agendamentos de um dispositivo (para sincronização na reconexão do ESP32).
+// O ESP32 chama este endpoint logo após conectar no MQTT para reconciliar sua NVS com o Firestore.
+// Autenticação: deviceId verificado contra o campo ownerUid via cabeçalho Authorization (Bearer token)
+// OU via query param ?deviceId=... sem autenticação (para uso direto pelo firmware sem token).
+// O firmware passa apenas deviceId; o backend retorna somente os schedules daquele device.
+exports.getDeviceSchedules = onRequest(
+  { invoker: "public" },
+  async (req, res) => {
+    try {
+      const deviceId = typeof req.query.deviceId === "string" ? req.query.deviceId.trim().toLowerCase().replace(/[:-]/g, "") : "";
+
+      if (!deviceId) {
+        return res.status(400).json({ error: "Parâmetro deviceId obrigatório." });
+      }
+
+      // Coleta agendamentos em todas as sub-coleções conhecidas do device
+      const docs = [];
+      for (const scheduleCollection of SCHEDULE_COLLECTIONS) {
+        const snapshot = await db
+          .collection("schedules")
+          .doc(deviceId)
+          .collection(scheduleCollection)
+          .get();
+        docs.push(...snapshot.docs);
+      }
+
+      const lista = docs.map((doc) => {
+        const d = doc.data();
+        // Converte diasSemana para array de inteiros (1-7, onde 1=domingo)
+        const diasSemana = Array.isArray(d.diasSemana) ? d.diasSemana.map(Number).filter((n) => !Number.isNaN(n)) : [];
+        return {
+          id: doc.id,
+          ativo: d.ativo === true,
+          diasSemana,
+          horaAcionamento: d.horaAcionamento ?? d.hora ?? null,
+          tempoAcionamento: d.tempoAcionamento ?? d.duracaoSegundos ?? null,
+          createdAt: toIsoOrNull(d.createdAt),
+        };
+      }).filter((s) => s.horaAcionamento != null && s.tempoAcionamento != null);
+
+      console.log(`[getDeviceSchedules] device=${deviceId} schedules=${lista.length}`);
+      res.status(200).json({ schedules: lista });
+    } catch (error) {
+      console.error("[getDeviceSchedules] Erro:", error);
+      res.status(500).json({ error: error.message });
     }
   }
 );

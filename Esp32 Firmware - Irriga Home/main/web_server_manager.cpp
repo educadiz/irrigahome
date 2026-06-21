@@ -505,7 +505,7 @@ static const char MANUTENCAO_HTML[] PROGMEM = R"rawhtml(
     <section class="card" id="live">
       <h2>Leituras</h2>
       <p class="sub">Leituras dos sensores em tempo real</p>
-      <div class="row"><span class="emoji">🌱</span><span class="label">End. MAC Irrigador</span><span class="value" id="lv-irrigador">--</span></div>
+      <div class="row"><span class="emoji">🌱</span><span class="label">MAC Address do irrigador</span><span class="value" id="lv-irrigador">--</span></div>
       <div class="row"><span class="emoji">💧</span><span class="label">Umidade do solo</span><span class="value" id="lv-solo">--</span></div>
       <div class="row"><span class="emoji">🌡️</span><span class="label">Temperatura</span><span class="value" id="lv-temp">--</span></div>
       <div class="row"><span class="emoji">💨</span><span class="label">Umidade do ar</span><span class="value" id="lv-ar">--</span></div>
@@ -529,18 +529,18 @@ static const char MANUTENCAO_HTML[] PROGMEM = R"rawhtml(
       <p class="sub">Offsets aplicados na leitura afetam exibição e lógica de controle automático</p>
 
       <div class="row">
-        <span class="label">Offset Umidade Solo [-30, 30]</span>
-        <input type="number" id="off-solo" min="-30" max="30" step="1" value="0">
+        <span class="label">Offset Umidade Solo [-30.0, +30.0]</span>
+        <input type="number" id="off-solo" min="-30.0" max="30.0" step="0.1" value="0.0">
         <span class="unit">%</span>
       </div>
       <div class="row">
-        <span class="label">Offset Temperatura [-10, 10]</span>
-        <input type="number" id="off-temp" min="-10" max="10" step="0.1" value="0.0">
+        <span class="label">Offset Temperatura [-10.0, +10.0]</span>
+        <input type="number" id="off-temp" min="-10.0" max="10.0" step="0.1" value="0.0">
         <span class="unit">°C</span>
       </div>
       <div class="row">
-        <span class="label">Offset Umidade do Ar [-20, 20]</span>
-        <input type="number" id="off-ar" min="-20" max="20" step="0.1" value="0.0">
+        <span class="label">Offset Umidade do Ar [-20.0, +20.0]</span>
+        <input type="number" id="off-ar" min="-20.0" max="20.0" step="0.1" value="0.0">
         <span class="unit">%</span>
       </div>
 
@@ -855,9 +855,9 @@ void WebServerManager::handleData() {
         "\"mode\":\"%s\","
       "\"scheduleCount\":%d,"
       "\"programmedDurationSec\":%d,"
-        "\"offSolo\":%d,"
-        "\"offTemp\":%.2f,"
-        "\"offAr\":%.2f,"
+        "\"offSolo\":%.1f,"
+        "\"offTemp\":%.1f,"
+        "\"offAr\":%.1f,"
         "\"flowScale\":%.6f,"
         "\"flowOffsetMl\":%.3f"
         "}",
@@ -871,9 +871,9 @@ void WebServerManager::handleData() {
         _actuator->isModoAuto()  ? "auto" : "manual",
       _actuator->getScheduleCount(),
       _actuator->getDuracaoSegundos(),
-        _sensors->getOffsetUmidadeSolo(),
-        _sensors->getOffsetTemperatura(),
-        _sensors->getOffsetUmidadeAr(),
+        (double)_sensors->getOffsetUmidadeSolo(),
+        (double)_sensors->getOffsetTemperatura(),
+        (double)_sensors->getOffsetUmidadeAr(),
         _flow->getVolumeCalibrationScale(),
         _flow->getVolumeCalibrationOffsetMl()
     );
@@ -984,14 +984,14 @@ void WebServerManager::handleConfig() {
     }
 
     float offTemp   = server.arg("offTemp").toFloat();
-    int   offSolo   = server.arg("offSolo").toInt();
+    float offSolo   = server.arg("offSolo").toFloat();
     float offAr     = server.arg("offAr").toFloat();
     float flowScale = server.arg("flowScale").toFloat();
     float flowOff   = server.arg("flowOffset").toFloat();
 
     // Validacao de limites antes de enfileirar
     if (offTemp   < -10.0f || offTemp   > 10.0f  ||
-        offSolo   < -30    || offSolo   > 30      ||
+        offSolo   < -30.0f || offSolo   > 30.0f   ||
         offAr     < -20.0f || offAr     > 20.0f   ||
         flowScale <=  0.0f || flowScale > 5.0f     ||
         flowOff   < -500.0f|| flowOff   > 500.0f) {
@@ -1032,9 +1032,9 @@ void WebServerManager::applyPendingConfig() {
     }
 
     Serial.println("[WEB] calibracao aplicada via pagina de manutencao");
-    Serial.print  ("[WEB] offSolo=");   Serial.print(_pending.offSolo);
-    Serial.print  (" offTemp=");        Serial.print(_pending.offTemp, 2);
-    Serial.print  (" offAr=");          Serial.print(_pending.offUmidAr, 2);
+    Serial.print  ("[WEB] offSolo=" );  Serial.print(_pending.offSolo,   1);
+    Serial.print  (" offTemp=");        Serial.print(_pending.offTemp,   1);
+    Serial.print  (" offAr=");          Serial.print(_pending.offUmidAr, 1);
     Serial.print  (" flowScale=");      Serial.print(_pending.flowScale, 6);
     Serial.print  (" flowOffsetMl=");   Serial.println(_pending.flowOffset, 3);
 }

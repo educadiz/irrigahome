@@ -38,15 +38,15 @@ void SensorManager::loadOffsets() {
     Preferences prefs;
     if (prefs.begin(NVS_NS_SENSOR, true)) {   // read-only
         _offsetTemperatura = prefs.getFloat(KEY_OFF_TEMP,    0.0f);
-        _offsetUmidadeSolo = prefs.getInt  (KEY_OFF_SOLO,    0);
+        _offsetUmidadeSolo = prefs.getFloat(KEY_OFF_SOLO,    0.0f);
         _offsetUmidadeAr   = prefs.getFloat(KEY_OFF_UMID_AR, 0.0f);
         prefs.end();
         Serial.print("[SENSOR] offsets carregados — temp:");
-        Serial.print(_offsetTemperatura, 2);
+        Serial.print(_offsetTemperatura, 1);
         Serial.print(" solo:");
-        Serial.print(_offsetUmidadeSolo);
+        Serial.print(_offsetUmidadeSolo, 1);
         Serial.print(" ar:");
-        Serial.println(_offsetUmidadeAr, 2);
+        Serial.println(_offsetUmidadeAr, 1);
     } else {
         Serial.println("[SENSOR] nenhum offset persistido (usando 0)");
     }
@@ -59,7 +59,7 @@ void SensorManager::flushOffsets() {
     Preferences prefs;
     if (prefs.begin(NVS_NS_SENSOR, false)) {
         prefs.putFloat(KEY_OFF_TEMP,    _offsetTemperatura);
-        prefs.putInt  (KEY_OFF_SOLO,    _offsetUmidadeSolo);
+        prefs.putFloat(KEY_OFF_SOLO,    _offsetUmidadeSolo);
         prefs.putFloat(KEY_OFF_UMID_AR, _offsetUmidadeAr);
         prefs.end();
         _nvsDirty = false;
@@ -83,15 +83,16 @@ float SensorManager::getOffsetTemperatura() const {
     return _offsetTemperatura;
 }
 
-void SensorManager::setOffsetUmidadeSolo(int offset) {
-    // Limite: ±30 pontos percentuais
-    if (offset < -30) offset = -30;
-    if (offset >  30) offset =  30;
-    _offsetUmidadeSolo = offset;
+void SensorManager::setOffsetUmidadeSolo(float offset) {
+    // Limite: ±30 pontos percentuais, precisao de 0.1
+    if (offset < -30.0f) offset = -30.0f;
+    if (offset >  30.0f) offset =  30.0f;
+    // Arredonda para 1 casa decimal
+    _offsetUmidadeSolo = roundf(offset * 10.0f) / 10.0f;
     _nvsDirty = true;
 }
 
-int SensorManager::getOffsetUmidadeSolo() const {
+float SensorManager::getOffsetUmidadeSolo() const {
     return _offsetUmidadeSolo;
 }
 
@@ -145,7 +146,7 @@ SensorData SensorManager::read() {
     }
     int leitura = (int)(soilAccum / SOIL_ADC_SAMPLES);
     int soloRaw = map(leitura, SOLO_SECO, SOLO_UMIDO, 0, 100);
-    data.umidadeSolo = constrain(soloRaw + _offsetUmidadeSolo, 0, 100);
+    data.umidadeSolo = constrain((int)roundf((float)soloRaw + _offsetUmidadeSolo), 0, 100);
 
     data.nivelAgua = digitalRead(WATER_LEVEL_PIN);
 

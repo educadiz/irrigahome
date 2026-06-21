@@ -27,6 +27,11 @@ public:
                                 float accountingVolumeMl = 0.0,
                                 float nominalFlowRateMlPerMin = 0.0);
 
+    // Sincroniza agendamentos da NVS com o Firestore logo após conectar.
+    // Chama o endpoint getDeviceSchedules, faz diff com a NVS e aplica: upsert + remoção.
+    // Executado na task Firebase (Core 0) para não bloquear o loop principal.
+    void syncSchedulesFromFirestore();
+
     // Enviar evento para Firebase via HTTP (executado na firebaseTask — não bloqueia).
     // getStopReasonString() e' chamado aqui (antes do enfileiramento) e nao dentro
     // da task, garantindo que nenhum acesso a IrrigationEventManager ocorra em outra
@@ -56,6 +61,10 @@ public:
 private:
     bool              _stopRequested = false;
     IrrigationStopReason _stopReason = STOP_REASON_COMPLETED;
+    // Flag: sincronização de agendamentos pendente (setada após reconexão MQTT).
+    volatile bool     _scheduleSyncPending = false;
+    // Flag: sync em andamento na task Firebase (evita disparo duplo).
+    volatile bool     _scheduleSyncRunning = false;
     // Referencia ao gerenciador de eventos injetada em begin().
     // Ponteiro (e nao referencia de membro) para permitir inicializacao tardia.
     IrrigationEventManager* _eventMgr = nullptr;

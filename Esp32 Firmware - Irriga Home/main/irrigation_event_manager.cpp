@@ -714,7 +714,8 @@ void IrrigationEventManager::addHistoryEvent(const IrrigationEvent& event) {
         historyBuffer[MAX_IRRIGATION_HISTORY - 1] = entry;
     }
 
-    appendHistoryLine(entry);
+    // Regrava o arquivo inteiro para manter apenas os 10 eventos mais recentes.
+    saveHistory();
 
     if (_historyMutex) xSemaphoreGive(_historyMutex);
 }

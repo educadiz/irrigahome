@@ -55,6 +55,8 @@ public:
     int getRemainingSeconds(unsigned long now);
     int getScheduleCount();
     void clearSchedules();
+    // Retorna o ID do agendamento no slot index (0-based). Retorna nullptr se slot vazio.
+    const char* getScheduleId(int index) const;
     bool upsertSchedule(const char* id, bool ativo, uint8_t diasMask, int hour, int minute, int durationSeconds, const char* createdAtIso = nullptr);
     bool removeSchedule(const char* id);
     /** Se já existe agendamento com esse id, devolve `ativo` na NVS (payload MQTT sem campo `ativo`). */
