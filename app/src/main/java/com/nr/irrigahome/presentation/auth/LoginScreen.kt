@@ -33,6 +33,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
@@ -42,6 +45,8 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -310,6 +315,9 @@ private fun AuthCredentialFields(
     confirmPassword: String,
     onConfirmPasswordChange: (String) -> Unit
 ) {
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    var confirmPasswordVisible by rememberSaveable { mutableStateOf(false) }
+
     if (isRegisterMode) {
         AuthTextField(
             value = fullName,
@@ -331,7 +339,15 @@ private fun AuthCredentialFields(
         onValueChange = onPasswordChange,
         label = "Senha",
         placeholder = "senha",
-        visualTransformation = PasswordVisualTransformation()
+        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+        trailingIcon = {
+            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                Icon(
+                    imageVector = if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                    contentDescription = if (passwordVisible) "Ocultar senha" else "Mostrar senha"
+                )
+            }
+        }
     )
 
     if (isRegisterMode) {
@@ -340,7 +356,15 @@ private fun AuthCredentialFields(
             onValueChange = onConfirmPasswordChange,
             label = "Confirmar senha",
             placeholder = "Repita a senha",
-            visualTransformation = PasswordVisualTransformation()
+            visualTransformation = if (confirmPasswordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+            trailingIcon = {
+                IconButton(onClick = { confirmPasswordVisible = !confirmPasswordVisible }) {
+                    Icon(
+                        imageVector = if (confirmPasswordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                        contentDescription = if (confirmPasswordVisible) "Ocultar confirmação de senha" else "Mostrar confirmação de senha"
+                    )
+                }
+            }
         )
     }
 }
@@ -351,7 +375,8 @@ private fun AuthTextField(
     onValueChange: (String) -> Unit,
     label: String,
     placeholder: String,
-    visualTransformation: VisualTransformation = VisualTransformation.None
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    trailingIcon: @Composable (() -> Unit)? = null
 ) {
     OutlinedTextField(
         value = value,
@@ -361,6 +386,7 @@ private fun AuthTextField(
         label = { Text(label) },
         placeholder = { Text(placeholder) },
         visualTransformation = visualTransformation,
+        trailingIcon = trailingIcon,
         textStyle = MaterialTheme.typography.bodyMedium,
         colors = OutlinedTextFieldDefaults.colors(
             focusedBorderColor = AppPrimaryGreen,

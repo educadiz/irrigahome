@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     //id("org.jetbrains.kotlin.android")
@@ -8,9 +10,13 @@ plugins {
 }
 
 // Lê credenciais do local.properties (nunca commitado)
-val localProps = java.util.Properties().also { props ->
-    val f = rootProject.file("local.properties")
-    if (f.exists()) props.load(f.inputStream())
+val localProps = Properties()
+val localPropsFile = rootProject.file("local.properties")
+
+if (localPropsFile.exists()) {
+    localPropsFile.inputStream().use { input ->
+        localProps.load(input)
+    }
 }
 
 android {
