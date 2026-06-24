@@ -36,555 +36,174 @@ static const char MANUTENCAO_HTML[] PROGMEM = R"rawhtml(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Irriga Home — Manutencao</title>
+<title>Irriga Home | Painel de Manutenção</title>
 <style>
-  :root {
-    --primary: #2B6CFF;
-    --card: #F2F4F7;
-    --border: #D7DDE6;
-    --text: #122033;
-    --muted: #3E516C;
-    --shadow: 0 12px 30px rgba(18, 32, 51, .08);
-  }
-
-  * {
-    box-sizing: border-box;
-    margin: 0;
-    padding: 0;
-  }
-
-  body {
-    min-height: 100vh;
-    padding: 24px 16px 18px;
-    display: flex;
-    justify-content: center;
-    background: linear-gradient(180deg, #b2e2ba 0%, #ebf5ef 100%);
-    color: var(--text);
-    font: 600 16px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  }
-
-  .page {
-    width: 100%;
-    max-width: 980px;
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
-  }
-
-  .topbar {
-    display: block;
-    width: 100%;
-  }
-
-  .title-wrap {
-    width: 100%;
-  }
-
-  .header-row {
-    width: 100%;
-  }
-
-  .header-action {
-    width: auto;
-    min-width: 72px;
-    height: 44px;
-    padding: 0 14px;
-    margin-top: 0;
-    border-radius: 999px;
-    background: var(--primary);
-    color: #fff;
-    border: 0;
-    box-shadow: none;
-    font: 700 .94rem/1 system-ui, sans-serif;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    white-space: nowrap;
-  }
-
-  .sair-btn {
-    width: auto;
-    min-width: 72px;
-    height: 44px;
-    padding: 0 14px;
-    margin-top: 0;
-    border: 0;
-    border-radius: 999px;
-    background: var(--primary);
-    color: #fff;
-    font: 700 .94rem/1 system-ui, sans-serif;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    white-space: nowrap;
-    box-shadow: none;
-  }
-
-  .sair-btn:active {
-    transform: translateY(1px);
-  }
-
-  header {
-    width: 100%;
-  }
-
-  h1 {
-    text-align: center;
-    font-size: 1.38rem;
-    font-weight: 700;
-    color: #1B5E20;
-    margin-bottom: 4px;
-  }
-
-  .sub {
-    text-align: center;
-    font-size: .8rem;
-    color: var(--muted);
-    margin-bottom: 12px;
-  }
-
-  .cards {
-    width: 100%;
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-  }
-
-  .card {
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 18px;
-    padding: 14px 16px;
-    box-shadow: var(--shadow);
-  }
-
-  .card h2 {
-    text-align: center;
-    margin-bottom: 10px;
-    font-size: .86rem;
-    letter-spacing: .09em;
-    text-transform: uppercase;
-    color: #1B2C41;
-  }
-
-  .row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    min-height: 30px;
-    margin-bottom: 7px;
-  }
-
-  .label {
-    flex: 1;
-    color: #15263A;
-    font-weight: 600;
-    font-size: .87rem;
-  }
-
-  .emoji {
-    width: 28px;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    margin-right: 8px;
-    font-size: 1.05rem;
-  }
-
-  .value {
-    min-width: 92px;
-    text-align: right;
-    color: var(--primary);
-    font-weight: 700;
-    font-size: .88rem;
-  }
-
-  .value.water-ok {
-    color: var(--primary);
-  }
-
-  .value.water-empty {
-    color: #C63535;
-  }
-
-  #live .row {
-    min-height: 26px;
-    margin-bottom: 5px;
-  }
-
-  #live .row:last-child {
-    margin-bottom: 0;
-  }
-
-  input[type=number] {
-    width: 96px;
-    padding: 6px 9px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: #fff;
-    color: var(--text);
-    text-align: center;
-    font-size: .85rem;
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, .8);
-  }
-
-  input[type=number]:focus {
-    outline: none;
-    border-color: var(--primary);
-    box-shadow: 0 0 0 3px rgba(43, 108, 255, .12);
-  }
-
-  .unit {
-    min-width: 28px;
-    color: var(--muted);
-    font-size: .78rem;
-    font-weight: 600;
-  }
-
-  .btn {
-    width: 100%;
-    margin-top: 8px;
-    min-height: 44px;
-    padding: 0 16px;
-    border: 0;
-    border-radius: 12px;
-    background: var(--primary);
-    color: #fff;
-    font: 700 .94rem/1 system-ui, sans-serif;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    white-space: nowrap;
-  }
-
-  .mini-btn {
-    min-height: 44px;
-    padding: 0 14px;
-    border: 0;
-    border-radius: 12px;
-    background: #1f8f46;
-    color: #fff;
-    font: 700 .94rem/1 system-ui, sans-serif;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    white-space: nowrap;
-  }
-
-  .mini-btn:active {
-    transform: translateY(1px);
-  }
-
-  .divider {
-    border: 0;
-    border-top: 1px solid var(--border);
-    margin: 14px 0;
-  }
-
-  .pill {
-    display: inline-block;
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: .76rem;
-    font-weight: 700;
-  }
-
-  .on {
-    background: #E8F7EC;
-    color: #1F7A3A;
-  }
-
-  .off {
-    background: transparent;
-    color: #C63535;
-    padding: 0;
-    border-radius: 0;
-  }
-
-  footer {
-    width: 100%;
-    text-align: center;
-    color: var(--muted);
-    font-size: .78rem;
-    padding: 4px 0 0;
-  }
-
-  .toast {
-    position: fixed;
-    left: 50%;
-    bottom: 24px;
-    transform: translateX(-50%);
-    padding: 10px 22px;
-    border-radius: 10px;
-    background: #1f8f46;
-    color: #fff;
-    font: 700 .9rem/1 system-ui, sans-serif;
-    opacity: 0;
-    pointer-events: none;
-    transition: opacity .3s;
-  }
-
-  .toast.err {
-    background: #d92d20;
-  }
-
-  .toast.show {
-    opacity: 1;
-  }
-
-  .modal-backdrop {
-    position: fixed;
-    inset: 0;
-    background: rgba(12, 22, 34, .48);
-    display: none;
-    align-items: center;
-    justify-content: center;
-    padding: 18px;
-    z-index: 50;
-  }
-
-  .modal-backdrop.show {
-    display: flex;
-  }
-
-  .modal {
-    width: min(100%, 360px);
-    background: #fff;
-    border-radius: 16px;
-    padding: 18px 18px 16px;
-    box-shadow: 0 18px 48px rgba(18, 32, 51, .22);
-    border: 1px solid rgba(215, 221, 230, .9);
-  }
-
-  .modal h3 {
-    text-align: center;
-    margin-bottom: 8px;
-    color: #1B2C41;
-    font-size: 1rem;
-  }
-
-  .modal p {
-    text-align: center;
-    color: var(--muted);
-    font-size: .9rem;
-    margin-bottom: 16px;
-  }
-
-  .modal-actions {
-    display: flex;
-    gap: 10px;
-  }
-
-  .modal-actions button {
-    flex: 1;
-    width: auto;
-    margin-top: 0;
-    height: 44px;
-  }
-
-  .secondary-btn {
-    background: #EEF2F7;
-    color: #1B2C41;
-  }
-
-  @media (max-width: 820px) {
-    .cards {
-      grid-template-columns: 1fr;
-    }
-
-    .page {
-      max-width: 760px;
-    }
-  }
-
-  @media (max-width: 520px) {
-    body {
-      padding: 12px 10px 14px;
-    }
-
-    .page {
-      gap: 10px;
-    }
-
-    .card {
-      padding: 12px 12px 13px;
-      border-radius: 14px;
-    }
-
-    .card h2 {
-      margin-bottom: 8px;
-    }
-
-    .row {
-      flex-wrap: wrap;
-      align-items: flex-start;
-      gap: 6px 8px;
-      min-height: unset;
-      margin-bottom: 10px;
-    }
-
-    .label {
-      flex: 1 1 100%;
-      min-width: 0;
-      line-height: 1.25;
-    }
-
-    .value {
-      flex: 1 1 auto;
-      min-width: 0;
-      text-align: left;
-      word-break: break-word;
-    }
-
-    .unit {
-      margin-left: auto;
-    }
-
-    .mini-btn {
-      width: 100%;
-      margin-left: 0;
-    }
-
-    input[type=number] {
-      width: 100%;
-      min-width: 0;
-      flex: 1 1 100%;
-      text-align: left;
-    }
-
-    .btn {
-      padding: 13px;
-    }
-
-    .topbar {
-      display: block;
-    }
-
-    .header-action {
-      min-width: 72px;
-      height: 44px;
-      padding: 0 14px;
-      font: 700 .94rem/1 system-ui, sans-serif;
-    }
-
-    .modal {
-      padding: 16px 16px 14px;
-    }
-
-    .modal-actions {
-      flex-direction: column;
-    }
-
-    .toast {
-      bottom: 14px;
-      width: calc(100% - 24px);
-      text-align: center;
-    }
-  }
+:root{--bg:#0f172a;--surface:#fff;--surface-2:#f8fafc;--border:#e2e8f0;--text:#0f172a;--muted:#64748b;--primary:#2563eb;--primary-d:#1d4ed8;--ok:#059669;--ok-bg:#ecfdf5;--err:#dc2626;--err-bg:#fef2f2;--radius:14px;--shadow:0 1px 2px rgba(15,23,42,.04),0 8px 24px -8px rgba(15,23,42,.08)}
+*{box-sizing:border-box;margin:0;padding:0}
+body{min-height:100vh;padding:28px 16px;background:var(--surface-2);color:var(--text);font:15px/1.4 -apple-system,system-ui,"Segoe UI",sans-serif;display:flex;justify-content:center}
+.page{width:100%;max-width:920px;display:flex;flex-direction:column;gap:16px}
+header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.brand{display:flex;align-items:center;gap:10px}
+.brand-mark{width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,var(--primary),#1e40af);display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;flex-shrink:0}
+.brand h1{font-size:1.05rem;font-weight:700;letter-spacing:-.01em}
+.brand .sub{font-size:.78rem;color:var(--muted);font-weight:500}
+.btn{height:38px;padding:0 16px;border:0;border-radius:9px;background:var(--primary);color:#fff;font:600 .87rem/1 inherit;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:6px;transition:.15s}
+.btn:hover{background:var(--primary-d)}
+.btn:active{transform:translateY(1px)}
+.btn-block{width:100%;height:44px;margin-top:6px;font-size:.92rem}
+.btn-ghost{background:var(--surface);color:var(--text);border:1px solid var(--border)}
+.btn-ghost:hover{background:var(--surface-2)}
+.btn-sm{height:32px;padding:0 12px;font-size:.8rem}
+.btn-danger{background:var(--surface);color:var(--err);border:1px solid #fecaca}
+.btn-danger:hover{background:var(--err-bg)}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:18px 20px;box-shadow:var(--shadow)}
+.card-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:4px}
+.card-head h2{font-size:.92rem;font-weight:700}
+.card .desc{font-size:.78rem;color:var(--muted);margin-bottom:14px}
+.field{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--border)}
+.field:last-of-type{border-bottom:0}
+.field .ico{width:20px;text-align:center;flex-shrink:0;opacity:.85}
+.field .label{flex:1;font-size:.85rem;font-weight:600;color:#334155}
+.field .value{font-weight:700;font-size:.86rem;color:var(--primary);text-align:right}
+.value.ok{color:var(--ok)}
+.value.bad{color:var(--err)}
+.tag{display:inline-flex;padding:2px 9px;border-radius:999px;font-size:.72rem;font-weight:700}
+.tag.on{background:var(--ok-bg);color:var(--ok)}
+.tag.off{background:#f1f5f9;color:var(--muted)}
+.cal-row{padding:10px 0;border-bottom:1px solid var(--border)}
+.cal-row:last-of-type{border-bottom:0}
+.cal-row .top{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px}
+.cal-row .label{font-size:.83rem;font-weight:600;color:#334155}
+.cal-row .range{font-size:.72rem;color:var(--muted)}
+.inp-wrap{display:flex;align-items:center;gap:8px}
+input[type=number]{flex:1;height:36px;padding:0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);color:var(--text);font:600 .88rem inherit;text-align:right;min-width:0}
+input[type=number]:focus{outline:none;border-color:var(--primary);background:#fff;box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+.unit{font-size:.74rem;color:var(--muted);font-weight:600;min-width:24px}
+hr{border:0;border-top:1px solid var(--border);margin:16px 0}
+.subtitle{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:10px}
+footer{text-align:center;color:var(--muted);font-size:.76rem;padding:6px 0 0}
+.toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);padding:11px 20px;border-radius:10px;background:var(--text);color:#fff;font:600 .85rem/1 inherit;box-shadow:0 12px 28px -6px rgba(0,0,0,.25);opacity:0;pointer-events:none;transition:.2s}
+.toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+.toast.err{background:var(--err)}
+.overlay{position:fixed;inset:0;background:rgba(15,23,42,.55);display:flex;align-items:center;justify-content:center;padding:18px;z-index:50}
+.overlay[hidden]{display:none}
+.modal{width:min(100%,360px);background:#fff;border-radius:16px;padding:22px 22px 18px;box-shadow:0 24px 60px -12px rgba(15,23,42,.35)}
+.modal-icon{width:44px;height:44px;border-radius:11px;background:var(--ok-bg);display:flex;align-items:center;justify-content:center;font-size:20px;margin:0 auto 12px}
+.modal h3{text-align:center;font-size:1.02rem;margin-bottom:4px}
+.modal p{text-align:center;color:var(--muted);font-size:.85rem;margin-bottom:18px}
+.modal .err-msg{text-align:center;color:var(--err);font-size:.82rem;font-weight:600;min-height:18px;margin-top:10px}
+.modal input[type=password]{width:100%;height:42px;padding:0 12px;border:1px solid var(--border);border-radius:9px;font:500 .9rem inherit;background:var(--surface-2)}
+.modal input[type=password]:focus{outline:none;border-color:var(--primary);background:#fff}
+.actions{display:flex;gap:10px;margin-top:6px}
+.actions .btn{flex:1;width:auto;margin-top:0;height:42px}
+@media (max-width:760px){.grid{grid-template-columns:1fr}}
+@media (max-width:520px){
+  body{padding:18px 12px}
+  .card{padding:15px 16px}
+  .field{flex-wrap:wrap}
+  .field .value{flex:1 1 auto;text-align:left}
+  .cal-row .inp-wrap{flex-wrap:nowrap}
+}
 </style>
 </head>
 <body>
 <div class="page">
+
   <header>
-    <div class="topbar">
-      <div class="header-row">
-        <div class="title-wrap">
-        <h1>Irriga 🌱 Home</h1>
-        <p class="sub">Console de manutenção e ajustes</p>
-        </div>
+    <div class="brand">
+      <div class="brand-mark">IH</div>
+      <div>
+        <h1>Irriga Home</h1>
+        <div class="sub">Painel de manutenção</div>
       </div>
     </div>
+    <button class="btn btn-ghost btn-sm" id="logout-btn" type="button" onclick="openLogout()" hidden>Sair</button>
   </header>
 
-  <div class="cards">
-    <section class="card" id="live">
-      <h2>Leituras</h2>
-      <p class="sub">Leituras dos sensores em tempo real</p>
-      <div class="row"><span class="emoji">🌱</span><span class="label">MAC Address do irrigador</span><span class="value" id="lv-irrigador">--</span></div>
-      <div class="row"><span class="emoji">💧</span><span class="label">Umidade do solo</span><span class="value" id="lv-solo">--</span></div>
-      <div class="row"><span class="emoji">🌡️</span><span class="label">Temperatura</span><span class="value" id="lv-temp">--</span></div>
-      <div class="row"><span class="emoji">💨</span><span class="label">Umidade do ar</span><span class="value" id="lv-ar">--</span></div>
-      <div class="row"><span class="emoji">🚰</span><span class="label">Nível do reservatório</span><span class="value" id="lv-agua">--</span></div>
-      <div class="row"><span class="emoji">🔌</span><span class="label">Bomba de água</span><span class="value" id="lv-bomba">--</span></div>
-      <div class="row"><span class="emoji">⚙️</span><span class="label">Modo de acionamento</span><span class="value" id="lv-modo">--</span></div>
-      <div class="row"><span class="emoji">⏱️</span><span class="label">Tempo de rega programado</span><span class="value" id="lv-programmed">--</span></div>
-      <div class="row">
-        <span class="emoji">🗓️</span>
-        <span class="label">Agendados na memória NVRAM</span>
-        <span class="value" id="lv-sched-count">--</span>
-        <button class="mini-btn" onclick="resetSchedules()">Reset</button>
-      </div>
-      <div class="logout-row" style="margin-top:8px;">
-        <button class="sair-btn" id="logout-btn" type="button" onclick="abrirLogoutModal()" style="display:none;">Sair</button>
+  <div class="grid">
+
+    <section class="card">
+      <div class="card-head"><h2>Leituras em tempo real</h2></div>
+      <p class="desc">Atualizado automaticamente a cada 3 segundos</p>
+
+      <div class="field"><span class="ico">📡</span><span class="label">Endereço MAC</span><span class="value" id="lv-irrigador">—</span></div>
+      <div class="field"><span class="ico">💧</span><span class="label">Umidade do solo</span><span class="value" id="lv-solo">—</span></div>
+      <div class="field"><span class="ico">🌡️</span><span class="label">Temperatura</span><span class="value" id="lv-temp">—</span></div>
+      <div class="field"><span class="ico">💨</span><span class="label">Umidade do ar</span><span class="value" id="lv-ar">—</span></div>
+      <div class="field"><span class="ico">🚰</span><span class="label">Reservatório</span><span class="value" id="lv-agua">—</span></div>
+      <div class="field"><span class="ico">🔌</span><span class="label">Bomba de água</span><span class="value" id="lv-bomba">—</span></div>
+      <div class="field"><span class="ico">⚙️</span><span class="label">Modo de acionamento</span><span class="value" id="lv-modo">—</span></div>
+      <div class="field"><span class="ico">⏱️</span><span class="label">Rega programada</span><span class="value" id="lv-programmed">—</span></div>
+      <div class="field">
+        <span class="ico">🗓️</span>
+        <span class="label">Agendamentos salvos</span>
+        <span class="value" id="lv-sched-count">—</span>
+        <button class="btn btn-danger btn-sm" onclick="resetSchedules()">Limpar</button>
       </div>
     </section>
 
     <section class="card">
-      <h2>Calibração</h2>
-      <p class="sub">Offsets aplicados na leitura afetam exibição e lógica de controle automático</p>
+      <div class="card-head"><h2>Calibração de sensores</h2></div>
+      <p class="desc">Offsets somados à leitura bruta — afetam exibição e controle automático</p>
 
-      <div class="row">
-        <span class="label">Offset Umidade Solo [-30.0, +30.0]</span>
-        <input type="number" id="off-solo" min="-30.0" max="30.0" step="0.1" value="0.0">
-        <span class="unit">%</span>
+      <div class="cal-row">
+        <div class="top"><span class="label">Umidade do solo</span><span class="range">−30,0 a +30,0</span></div>
+        <div class="inp-wrap"><input type="number" id="off-solo" min="-30" max="30" step="0.1" value="0.0"><span class="unit">%</span></div>
       </div>
-      <div class="row">
-        <span class="label">Offset Temperatura [-10.0, +10.0]</span>
-        <input type="number" id="off-temp" min="-10.0" max="10.0" step="0.1" value="0.0">
-        <span class="unit">°C</span>
+      <div class="cal-row">
+        <div class="top"><span class="label">Temperatura</span><span class="range">−10,0 a +10,0</span></div>
+        <div class="inp-wrap"><input type="number" id="off-temp" min="-10" max="10" step="0.1" value="0.0"><span class="unit">°C</span></div>
       </div>
-      <div class="row">
-        <span class="label">Offset Umidade do Ar [-20.0, +20.0]</span>
-        <input type="number" id="off-ar" min="-20.0" max="20.0" step="0.1" value="0.0">
-        <span class="unit">%</span>
+      <div class="cal-row">
+        <div class="top"><span class="label">Umidade do ar</span><span class="range">−20,0 a +20,0</span></div>
+        <div class="inp-wrap"><input type="number" id="off-ar" min="-20" max="20" step="0.1" value="0.0"><span class="unit">%</span></div>
       </div>
 
-      <hr class="divider">
-      <h2 style="margin-bottom:12px">Ajuste de vazão da bomba</h2>
-      <div class="row">
-        <span class="label">Fator [0.1, 5]</span>
-        <input type="number" id="flow-scale" min="0.1" max="5" step="0.0001" value="1.0">
-        <span class="unit"></span>
+      <hr>
+      <p class="subtitle">Vazão da bomba</p>
+
+      <div class="cal-row">
+        <div class="top"><span class="label">Fator de escala</span><span class="range">0,1 a 5,0</span></div>
+        <div class="inp-wrap"><input type="number" id="flow-scale" min="0.1" max="5" step="0.0001" value="1.0"><span class="unit">×</span></div>
       </div>
-      <div class="row">
-        <span class="label">Offset (mL) [-500, 500]</span>
-        <input type="number" id="flow-offset" min="-500" max="500" step="0.1" value="0.0">
-        <button class="mini-btn" onclick="medir()" id="measure-btn">Medir</button>
-        <span class="unit">mL</span>
+      <div class="cal-row">
+        <div class="top"><span class="label">Offset volumétrico</span><span class="range">−500 a +500</span></div>
+        <div class="inp-wrap">
+          <input type="number" id="flow-offset" min="-500" max="500" step="0.1" value="0.0">
+          <span class="unit">mL</span>
+          <button class="btn btn-ghost btn-sm" onclick="medir()" id="measure-btn">Medir</button>
+        </div>
       </div>
 
-      <button class="btn" onclick="salvar()">Salvar ajuste</button>
+      <button class="btn btn-block" onclick="salvar()">Salvar calibração</button>
     </section>
+
   </div>
 
-  <!-- Auth overlay: solicita senha antes de permitir ajustes -->
-  <div id="auth-overlay" style="position:fixed;left:0;top:0;right:0;bottom:0;background:rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;">
-    <div style="width:360px;background:#fff;padding:18px;border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,0.2);">
-      <h2 style="margin-bottom:8px;text-align:center">Acesso Restrito</h2>
-      <p style="font-size:.9rem;color:#3E516C;margin-bottom:12px;text-align:center">Informe a senha para liberar as configurações (3 tentativas)</p>
-      <div style="display:flex;gap:8px;margin-bottom:12px;align-items:center;">
-        <input id="auth-pass" type="password" placeholder="Senha" style="flex:1;padding:8px;border:1px solid #D7DDE6;border-radius:8px;font-size:1rem">
-        <button id="auth-btn" class="mini-btn">Entrar</button>
-      </div>
-      <div style="text-align:center;color:#C63535;font-weight:700" id="auth-msg"></div>
-    </div>
-  </div>
-
-  <footer>Desenvolvido por CodeWave | 2026</footer>
+  <footer>Irriga Home · E.Cadiz © 2026</footer>
 </div>
 
-<div class="modal-backdrop" id="logout-modal" aria-hidden="true">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="logout-title">
-    <h3 id="logout-title">Confirmar saída</h3>
-    <p>Deseja encerrar a sessão de manutenção deste irrigador?</p>
-    <div class="modal-actions">
-      <button class="btn secondary-btn" type="button" onclick="fecharLogoutModal()">Cancelar</button>
-      <button class="sair-btn" type="button" onclick="confirmarLogout()">Sair</button>
+<!-- Auth -->
+<div class="overlay" id="auth-overlay">
+  <div class="modal">
+    <div class="modal-icon">🔒</div>
+    <h3>Acesso restrito</h3>
+    <p>Informe a senha de manutenção (3 tentativas)</p>
+    <input type="password" id="auth-pass" placeholder="Senha">
+    <div class="err-msg" id="auth-msg"></div>
+    <button class="btn btn-block" id="auth-btn">Entrar</button>
+  </div>
+</div>
+
+<!-- Logout confirm -->
+<div class="overlay" id="logout-modal" hidden>
+  <div class="modal">
+    <h3>Encerrar sessão?</h3>
+    <p>Você precisará informar a senha novamente para fazer ajustes.</p>
+    <div class="actions">
+      <button class="btn btn-ghost" onclick="closeLogout()">Cancelar</button>
+      <button class="btn btn-danger" onclick="confirmLogout()">Sair</button>
     </div>
   </div>
 </div>
@@ -592,193 +211,111 @@ static const char MANUTENCAO_HTML[] PROGMEM = R"rawhtml(
 <div class="toast" id="toast"></div>
 
 <script>
-const $ = id => document.getElementById(id);
+const $=id=>document.getElementById(id);
+const badge=on=>on?'<span class="tag on">Ligada</span>':'<span class="tag off">Desligada</span>';
+const fmtDur=s=>{s=Math.max(0,s|0);const m=(s/60)|0,r=s%60;return m?m+' min'+(r?' '+r+' s':''):s+' s';};
 
-const badge = on => on ? '<span class="pill on">ON</span>' : '<span class="off">OFF</span>';
-const formatDuration = totalSeconds => {
-  const seconds = Math.max(0, totalSeconds | 0), minutes = (seconds / 60) | 0, rest = seconds % 60;
-  return minutes ? (minutes + ' min' + (rest ? ' ' + rest + ' s' : '')) : (seconds + ' s');
-};
+function toast(msg,err){const t=$('toast');t.textContent=msg;t.className='toast show'+(err?' err':'');setTimeout(()=>t.className='toast',3000);}
 
-function toast(msg, err) {
-  $('toast').textContent = msg;
-  $('toast').className = 'toast show' + (err ? ' err' : '');
-  setTimeout(() => { $('toast').className = 'toast'; }, 3000);
+// ---- Autenticação ----
+function setLogoutVisible(v){$('logout-btn').hidden=!v;}
+function openLogout(){$('logout-modal').hidden=false;}
+function closeLogout(){$('logout-modal').hidden=true;}
+
+function confirmLogout(){
+  fetch('/api/logout',{method:'POST'}).then(r=>r.json()).then(d=>{
+    closeLogout();
+    if(d.ok){
+      setLogoutVisible(false);
+      $('auth-overlay').style.display='flex';
+      $('auth-pass').value='';$('auth-pass').disabled=false;$('auth-btn').disabled=false;
+      $('auth-msg').textContent='';
+      toast('Sessão encerrada');
+    }else toast('Não foi possível sair',true);
+  }).catch(()=>{closeLogout();toast('Falha na comunicação com o irrigador',true);});
 }
 
-// ---- Autenticacao ----
-let isAuthenticated = false;
-function showAuthMessage(msg) {
-  $('auth-msg').textContent = msg;
-}
-
-function setLogoutButtonVisible(visible) {
-  const btn = $('logout-btn');
-  if (btn) btn.style.display = visible ? 'inline-flex' : 'none';
-}
-
-function abrirLogoutModal() {
-  const modal = $('logout-modal');
-  if (modal) modal.classList.add('show');
-}
-
-function fecharLogoutModal() {
-  const modal = $('logout-modal');
-  if (modal) modal.classList.remove('show');
-}
-
-function confirmarLogout() {
-  fetch('/api/logout', { method: 'POST' })
-    .then(r => r.json())
-    .then(d => {
-      fecharLogoutModal();
-      if (d.ok) {
-        isAuthenticated = false;
-        setLogoutButtonVisible(false);
-        document.getElementById('auth-overlay').style.display = 'flex';
-        $('auth-pass').value = '';
-        $('auth-pass').disabled = false;
-        $('auth-btn').disabled = false;
-        showAuthMessage('Sessão encerrada');
-        toast('Sessão encerrada', false);
-      } else {
-        toast('Não foi possível sair', true);
+function tryAuth(){
+  const pass=$('auth-pass').value||'';
+  fetch('/api/auth',{method:'POST',body:new URLSearchParams({password:pass})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){
+        $('auth-overlay').style.display='none';
+        $('auth-msg').textContent='';
+        setLogoutVisible(true);
+        toast('Acesso liberado');
+      }else if(d.locked){
+        $('auth-msg').textContent='Bloqueado: limite de tentativas excedido';
+        $('auth-btn').disabled=true;$('auth-pass').disabled=true;
+      }else{
+        $('auth-msg').textContent='Senha inválida — tentativas restantes: '+(d.attemptsLeft??0);
       }
-    })
-    .catch(() => {
-      fecharLogoutModal();
-      toast('Falha na comunicação com o irrigador', true);
-    });
+    }).catch(()=>{$('auth-msg').textContent='Falha na comunicação';});
 }
 
-function tryAuth() {
-  const pass = $('auth-pass').value || '';
-  fetch('/api/auth', { method: 'POST', body: new URLSearchParams({ password: pass }) })
-    .then(r => r.json())
-    .then(d => {
-      if (d.ok) {
-        isAuthenticated = true;
-        document.getElementById('auth-overlay').style.display = 'none';
-        showAuthMessage('');
-        setLogoutButtonVisible(true);
-        toast('Acesso liberado', false);
-      } else {
-        if (d.locked) {
-          showAuthMessage('Bloqueado: número máximo de tentativas excedido');
-          $('auth-btn').disabled = true;
-          $('auth-pass').disabled = true;
-        } else {
-          showAuthMessage('Senha inválida. Tentativas restantes: ' + (d.attemptsLeft ?? 0));
-        }
-      }
-    })
-    .catch(() => showAuthMessage('Falha na comunicação'));
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  // hook login button
-  const btn = $('auth-btn');
-  if (btn) btn.addEventListener('click', tryAuth);
-  const input = $('auth-pass');
-  if (input) input.addEventListener('keyup', (e) => { if (e.key === 'Enter') tryAuth(); });
-  setLogoutButtonVisible(false);
-
-  const modal = $('logout-modal');
-  if (modal) {
-    modal.addEventListener('click', (event) => {
-      if (event.target === modal) {
-        fecharLogoutModal();
-      }
-    });
-  }
+document.addEventListener('DOMContentLoaded',()=>{
+  $('auth-btn').addEventListener('click',tryAuth);
+  $('auth-pass').addEventListener('keyup',e=>{if(e.key==='Enter')tryAuth();});
+  setLogoutVisible(false);
+  $('logout-modal').addEventListener('click',e=>{if(e.target===$('logout-modal'))closeLogout();});
 });
 
+function atualizar(){
+  fetch('/api/data').then(r=>r.json()).then(d=>{
+    $('lv-irrigador').textContent=d.macAddress||d.deviceId||'—';
+    $('lv-solo').textContent=d.soil+'%';
+    $('lv-temp').textContent=d.temp+'\u00b0C';
+    $('lv-ar').textContent=d.humidity+'%';
+    $('lv-agua').textContent=d.water?'Cheio':'Vazio';
+    $('lv-agua').className='value '+(d.water?'ok':'bad');
+    $('lv-bomba').innerHTML=badge(d.pump);
+    $('lv-modo').textContent=d.mode==='auto'?'Automático':'Manual';
+    $('lv-programmed').textContent=fmtDur(d.programmedDurationSec);
+    $('lv-sched-count').textContent=String(d.scheduleCount??0);
 
-function atualizar() {
-  fetch('/api/data')
-    .then(r => r.json())
-    .then(d => {
-      $('lv-irrigador').textContent = d.macAddress || d.deviceId || '--';
-      $('lv-solo').textContent = d.soil + '%';
-      $('lv-temp').textContent = d.temp + '\u00b0C';
-      $('lv-ar').textContent = d.humidity + '%';
-      $('lv-agua').textContent = d.water ? 'Cheio' : 'Vazio';
-      $('lv-agua').className = 'value ' + (d.water ? 'water-ok' : 'water-empty');
-      $('lv-bomba').innerHTML = badge(d.pump);
-      $('lv-modo').textContent = d.mode === 'auto' ? 'Automático' : 'Manual';
-      $('lv-programmed').textContent = formatDuration(d.programmedDurationSec);
-      $('lv-sched-count').textContent = String(d.scheduleCount ?? 0);
-
-      if (!window._loaded) {
-        window._loaded = true;
-        $('off-solo').value = d.offSolo;
-        $('off-temp').value = d.offTemp;
-        $('off-ar').value = d.offAr;
-        $('flow-scale').value = d.flowScale;
-        $('flow-offset').value = d.flowOffsetMl;
-      }
-    })
-    .catch(() => {});
+    if(!window._loaded){
+      window._loaded=true;
+      $('off-solo').value=d.offSolo;
+      $('off-temp').value=d.offTemp;
+      $('off-ar').value=d.offAr;
+      $('flow-scale').value=d.flowScale;
+      $('flow-offset').value=d.flowOffsetMl;
+    }
+  }).catch(()=>{});
 }
 
-function resetSchedules() {
-  if (!confirm('Confirma zerar todos os agendamentos salvos no ESP32?')) {
-    return;
-  }
-
-  fetch('/api/schedules/reset', { method: 'POST' })
-    .then(r => r.json())
-    .then(d => {
-      if (d.ok) {
-        toast('Agendamentos apagados com sucesso!');
-        atualizar();
-      } else {
-        toast('Falha ao apagar agendamentos', true);
-      }
-    })
-    .catch(() => toast('Falha na comunicação com o irrigador', true));
+function resetSchedules(){
+  if(!confirm('Confirma zerar todos os agendamentos salvos no ESP32?'))return;
+  fetch('/api/schedules/reset',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.ok){toast('Agendamentos apagados com sucesso!');atualizar();}
+    else toast('Falha ao apagar agendamentos',true);
+  }).catch(()=>toast('Falha na comunicação com o irrigador',true));
 }
 
-function salvar() {
-  const body = new URLSearchParams({
-    offSolo: $('off-solo').value,
-    offTemp: $('off-temp').value,
-    offAr: $('off-ar').value,
-    flowScale: $('flow-scale').value,
-    flowOffset: $('flow-offset').value
+function salvar(){
+  const body=new URLSearchParams({
+    offSolo:$('off-solo').value,offTemp:$('off-temp').value,offAr:$('off-ar').value,
+    flowScale:$('flow-scale').value,flowOffset:$('flow-offset').value
   });
-
-  fetch('/api/config', { method: 'POST', body })
-    .then(r => r.json())
-    .then(d => toast(d.ok ? 'Calibração salva com sucesso!' : 'Erro ao salvar: ' + d.error, !d.ok))
-    .catch(() => toast('Falha na comunicação com o irrigador', true));
+  fetch('/api/config',{method:'POST',body}).then(r=>r.json())
+    .then(d=>toast(d.ok?'Calibração salva com sucesso!':'Erro ao salvar: '+d.error,!d.ok))
+    .catch(()=>toast('Falha na comunicação com o irrigador',true));
 }
 
-function logout() {
-  abrirLogoutModal();
-}
-
-function medir() {
-  if (!confirm('Acionar bomba manualmente para medição?')) return;
-  let duration = prompt('Duração em segundos para medir (ex: 10):', '10');
-  if (duration === null) return;
-  duration = parseInt(duration, 10);
-  if (isNaN(duration) || duration <= 0) { toast('Duração inválida', true); return; }
-
-  fetch('/api/measure', { method: 'POST', body: new URLSearchParams({ duration: String(duration) }) })
-    .then(r => r.json())
-    .then(d => {
-      if (d.ok) {
-        toast('Medição iniciada por ' + duration + 's');
-      } else {
-        toast('Falha ao iniciar medição: ' + (d.error || 'unauthorized'), true);
-      }
-    })
-    .catch(() => toast('Falha na comunicação com o irrigador', true));
+function medir(){
+  let duration=prompt('Duração em segundos para medir (ex: 10):','10');
+  if(duration===null)return;
+  duration=parseInt(duration,10);
+  if(isNaN(duration)||duration<=0){toast('Duração inválida',true);return;}
+  fetch('/api/measure',{method:'POST',body:new URLSearchParams({duration:String(duration)})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok)toast('Medição iniciada por '+duration+'s');
+      else toast('Falha ao iniciar medição: '+(d.error||'unauthorized'),true);
+    }).catch(()=>toast('Falha na comunicação com o irrigador',true));
 }
 
 atualizar();
-setInterval(atualizar, 3000);
+setInterval(atualizar,3000);
 </script>
 </body>
 </html>

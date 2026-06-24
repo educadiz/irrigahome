@@ -36,11 +36,12 @@ static inline String getMqttCommandsTopic() {
 
 // PINOS
 #define DHTPIN 4
+#define RESET 27
 #define DHTTYPE DHT22
 #define SOIL_PIN 32
 #define WATER_LEVEL_PIN 5
-#define PUMP_PIN 2
-#define LED_PIN 12 // on-off (remapeado para liberar GPIO 23 ao sensor de vazao)
+#define PUMP_PIN 18 // mudei era 2
+// #define LED_PIN 12 // on-off (remapeado para liberar GPIO 23 ao sensor de vazao)
 #define FLOW_SENSOR_PIN 23
 #define FLOW_PULSES_PER_LITER 260000  // calibrado: 13000 pulsos = 50 mL -> 260000 pulsos/L
 // Volume real aferido a partir da nova referencia do sensor.
@@ -73,6 +74,10 @@ static inline String getMqttCommandsTopic() {
 // O ADC do ESP32 e' ruidoso quando o radio WiFi esta ativo; 6 amostras
 // reduzem o desvio sem bloquear o loop (cada analogRead leva ~10 us).
 #define SOIL_ADC_SAMPLES 6
+
+// ACIONAMENTO DA BOMBA
+#define PUMP_ON LOW
+#define PUMP_OFF HIGH
 
 // AUTO MODO
 #define THRESHOLD_UMIDADE_PADRAO 40
