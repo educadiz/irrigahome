@@ -40,8 +40,8 @@ static inline String getMqttCommandsTopic() {
 #define DHTTYPE DHT22
 #define SOIL_PIN 32
 #define WATER_LEVEL_PIN 5
-#define PUMP_PIN 18 // mudei era 2
-// #define LED_PIN 12 // on-off (remapeado para liberar GPIO 23 ao sensor de vazao)
+#define PUMP_PIN 18
+#define PUMP_LED 2  
 #define FLOW_SENSOR_PIN 23
 #define FLOW_PULSES_PER_LITER 260000  // calibrado: 13000 pulsos = 50 mL -> 260000 pulsos/L
 // Volume real aferido a partir da nova referencia do sensor.
@@ -78,6 +78,8 @@ static inline String getMqttCommandsTopic() {
 // ACIONAMENTO DA BOMBA
 #define PUMP_ON LOW
 #define PUMP_OFF HIGH
+#define PUMP_LED_ON HIGH
+#define PUMP_LED_OFF LOW
 
 // AUTO MODO
 #define THRESHOLD_UMIDADE_PADRAO 40

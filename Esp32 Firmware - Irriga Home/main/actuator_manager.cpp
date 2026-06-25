@@ -57,8 +57,10 @@ static bool isDueWithGrace(const IrrigationSchedule& item, time_t nowTs, const t
 // Keeps defaults when stored values invalid. Called once from `setup()`.
 void ActuatorManager::begin() {
     pinMode(PUMP_PIN, OUTPUT);
-    digitalWrite(PUMP_PIN, PUMP_OFF); // mudei aqui
-    //pinMode(LED_PIN, OUTPUT);
+    digitalWrite(PUMP_PIN, PUMP_OFF);
+
+    pinMode(PUMP_LED, OUTPUT);
+    digitalWrite(PUMP_LED, PUMP_LED_OFF);
 
     preferences.begin("irrigahome", false);
     modoAuto = preferences.getBool(KEY_MODO_AUTO, false);
@@ -142,8 +144,9 @@ void ActuatorManager::saveSchedulesToStorage() {
 // Turn pump ON: set physical pins, update state and log event.
 void ActuatorManager::ligar() {
 
-    digitalWrite(PUMP_PIN, PUMP_ON); // mudei aqui
-    //digitalWrite(LED_PIN, HIGH); 
+    digitalWrite(PUMP_PIN, PUMP_ON);
+    digitalWrite(PUMP_LED, PUMP_LED_ON);
+
     pumpStartedAtMs = millis();
     bombaLigada = true;
     Serial.println("🚿 Bomba ON");
@@ -151,8 +154,9 @@ void ActuatorManager::ligar() {
 
 // Turn pump OFF: clear pins, update state and log event.
 void ActuatorManager::desligar() {
-    digitalWrite(PUMP_PIN, PUMP_OFF); // mudei aqui
-    //digitalWrite(LED_PIN, LOW);
+    digitalWrite(PUMP_PIN, PUMP_OFF);
+    digitalWrite(PUMP_LED, PUMP_LED_OFF);
+
     pumpStartedAtMs = 0;
     bombaLigada = false;
     Serial.println("🛑 Bomba OFF");
