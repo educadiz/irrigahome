@@ -49,6 +49,40 @@ static MqttManager* mqttManagerInstance = nullptr;
 // Usado pelos helpers estaticos (callback, connectMQTT) que nao recebem 'this'.
 static IrrigationEventManager* g_eventMgr = nullptr;
 
+// Controle de eventos ja enfileirados para o Firebase nesta sessao (RAM).
+// Necessario porque um evento pode permanecer na fila RAM do IrrigationEventManager
+// por varios ciclos de loop() enquanto o MQTT falha em publicar (retry) — sem este
+// controle, sendIrrigationEventToFirebase() seria chamado repetidamente para o
+// mesmo evento a cada ~poucos segundos, inundando a fila do Firebase (capacidade 4).
+// Nao precisa ser persistente: se reiniciar antes do Firebase confirmar, o controle
+// definitivo (sentToFirebase no JSONL via removeFromHistory) continua garantindo
+// a entrega em ciclos futuros.
+static const int MAX_FIREBASE_ENQUEUED_IDS = 16;
+static char firebaseEnqueuedIds[MAX_FIREBASE_ENQUEUED_IDS][24];
+static int firebaseEnqueuedCount = 0;
+
+static bool isAlreadyEnqueuedForFirebase(const char* eventId) {
+    for (int i = 0; i < firebaseEnqueuedCount; i++) {
+        if (strcmp(firebaseEnqueuedIds[i], eventId) == 0) return true;
+    }
+    return false;
+}
+
+static void markEnqueuedForFirebase(const char* eventId) {
+    if (isAlreadyEnqueuedForFirebase(eventId)) return;
+    if (firebaseEnqueuedCount < MAX_FIREBASE_ENQUEUED_IDS) {
+        strncpy(firebaseEnqueuedIds[firebaseEnqueuedCount], eventId, sizeof(firebaseEnqueuedIds[0]) - 1);
+        firebaseEnqueuedIds[firebaseEnqueuedCount][sizeof(firebaseEnqueuedIds[0]) - 1] = '\0';
+        firebaseEnqueuedCount++;
+    } else {
+        for (int i = 1; i < MAX_FIREBASE_ENQUEUED_IDS; i++) {
+            memcpy(firebaseEnqueuedIds[i - 1], firebaseEnqueuedIds[i], sizeof(firebaseEnqueuedIds[0]));
+        }
+        strncpy(firebaseEnqueuedIds[MAX_FIREBASE_ENQUEUED_IDS - 1], eventId, sizeof(firebaseEnqueuedIds[0]) - 1);
+        firebaseEnqueuedIds[MAX_FIREBASE_ENQUEUED_IDS - 1][sizeof(firebaseEnqueuedIds[0]) - 1] = '\0';
+    }
+}
+
 // Conexão assíncrona para evitar bloqueio do loop principal (task watchdog)
 // Precisa ser visível entre Core 0 e Core 1 sem cache agressivo.
 static volatile bool connectTaskRunning = false;
@@ -1917,7 +1951,7 @@ void MqttManager::loop() {
             g_eventMgr->formatIso8601(event.startAt, startIso, sizeof(startIso));
             g_eventMgr->formatIso8601(event.endAt, endIso, sizeof(endIso));
 
-            // Publicar via MQTT (nao bloqueia). So remove da fila se sucesso.
+            // Publicar via MQTT (nao bloqueia). So remove da fila MQTT se sucesso.
             bool mqttPublished = publishIrrigationEvent(
                 event.eventId,
                 startIso,
@@ -1937,30 +1971,52 @@ void MqttManager::loop() {
 
             if (!mqttPublished) {
                 fwLogf("WARN", "MQTT", "Evento pendente mantido para retry: %s", event.eventId);
-                break;
             }
 
-            // Enfileira para HTTP Firebase (nao bloqueia — a task cuida do envio)
-            sendIrrigationEventToFirebase(
-                event.eventId,
-                startIso,
-                endIso,
-                event.durationSec,
-                g_eventMgr->getTriggerTypeString(event.trigger),
-                event.stopReason,
-                data.umidadeSolo,
-                (int)data.umidadeAr,
-                data.temperatura,
-                data.nivelAgua,
-                event.totalPulses,
-                event.totalVolumeLiters,
-                event.avgFlowRateLpm,
-                event.flowDetected,
-                event.flowStatus,
-                event.totalVolumeMl,
-                event.accountingVolumeMl,
-                event.nominalFlowRateMlPerMin
-            );
+            // Envio ao Firebase e' um canal independente do MQTT: deve ser
+            // tentado mesmo se o MQTT falhar (ex: broker fora do ar), pois
+            // ele e' o unico caminho que alimenta o historico do app Kotlin.
+            // ANTES: este envio so ocorria dentro do "if (mqttPublished)",
+            // o que travava o evento inteiro (Firebase incluso) sempre que
+            // o MQTT falhava — causa raiz de eventos que nunca chegavam
+            // ao Firestore mesmo com o evento corretamente gerado no firmware.
+            //
+            // isAlreadyEnqueuedForFirebase evita reenfileirar o mesmo evento
+            // a cada ciclo de loop() enquanto ele permanece na fila RAM
+            // aguardando retry do MQTT (ver bloco abaixo).
+            if (!isAlreadyEnqueuedForFirebase(event.eventId)) {
+                sendIrrigationEventToFirebase(
+                    event.eventId,
+                    startIso,
+                    endIso,
+                    event.durationSec,
+                    g_eventMgr->getTriggerTypeString(event.trigger),
+                    event.stopReason,
+                    data.umidadeSolo,
+                    (int)data.umidadeAr,
+                    data.temperatura,
+                    data.nivelAgua,
+                    event.totalPulses,
+                    event.totalVolumeLiters,
+                    event.avgFlowRateLpm,
+                    event.flowDetected,
+                    event.flowStatus,
+                    event.totalVolumeMl,
+                    event.accountingVolumeMl,
+                    event.nominalFlowRateMlPerMin
+                );
+                markEnqueuedForFirebase(event.eventId);
+            }
+
+            if (!mqttPublished) {
+                // Mantem o evento na fila RAM para retry do MQTT no proximo
+                // ciclo (mesmo comportamento de antes para o canal MQTT).
+                // O Firebase ja foi acionado (ou ja estava marcado como
+                // enfileirado) e nao sera disparado de novo para este
+                // eventId nesta sessao — a confirmacao definitiva de entrega
+                // continua sendo o HTTP 200 processado por removeFromHistory().
+                break;
+            }
 
             g_eventMgr->markEventSent(event.eventId);
         }

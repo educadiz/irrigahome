@@ -83,6 +83,8 @@ input[type=number]:focus{outline:none;border-color:var(--primary);background:#ff
 hr{border:0;border-top:1px solid var(--border);margin:16px 0}
 .subtitle{font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:10px}
 footer{text-align:center;color:var(--muted);font-size:.76rem;padding:6px 0 0}
+footer #lv-lastupdate{font-size:.7rem;opacity:.7}
+footer #lv-lastupdate.stale{color:var(--err);opacity:1;font-weight:600}
 .toast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%) translateY(8px);padding:11px 20px;border-radius:10px;background:var(--text);color:#fff;font:600 .85rem/1 inherit;box-shadow:0 12px 28px -6px rgba(0,0,0,.25);opacity:0;pointer-events:none;transition:.2s}
 .toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 .toast.err{background:var(--err)}
@@ -181,7 +183,7 @@ footer{text-align:center;color:var(--muted);font-size:.76rem;padding:6px 0 0}
 
   </div>
 
-  <footer>Irriga Home · E.Cadiz © 2026</footer>
+  <footer>Irriga Home · E.Cadiz © 2026<br><span id="lv-lastupdate">Aguardando dados…</span></footer>
 </div>
 
 <!-- Auth -->
@@ -260,6 +262,11 @@ document.addEventListener('DOMContentLoaded',()=>{
   $('logout-modal').addEventListener('click',e=>{if(e.target===$('logout-modal'))closeLogout();});
 });
 
+function fmtHora(d){
+  return d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit',second:'2-digit'})
+    +' · '+d.toLocaleDateString('pt-BR');
+}
+
 function atualizar(){
   fetch('/api/data').then(r=>r.json()).then(d=>{
     $('lv-irrigador').textContent=d.macAddress||d.deviceId||'—';
@@ -273,6 +280,12 @@ function atualizar(){
     $('lv-programmed').textContent=fmtDur(d.programmedDurationSec);
     $('lv-sched-count').textContent=String(d.scheduleCount??0);
 
+    // Marca o instante local em que esta leitura foi recebida.
+    // Se a tela travar ou a conexão cair, este valor para de avançar,
+    // permitindo identificar o exato momento da última atualização real.
+    $('lv-lastupdate').textContent='Última atualização: '+fmtHora(new Date());
+    $('lv-lastupdate').classList.remove('stale');
+
     if(!window._loaded){
       window._loaded=true;
       $('off-solo').value=d.offSolo;
@@ -281,7 +294,9 @@ function atualizar(){
       $('flow-scale').value=d.flowScale;
       $('flow-offset').value=d.flowOffsetMl;
     }
-  }).catch(()=>{});
+  }).catch(()=>{
+    $('lv-lastupdate').classList.add('stale');
+  });
 }
 
 function resetSchedules(){
