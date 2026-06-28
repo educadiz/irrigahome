@@ -53,8 +53,6 @@ static bool isDueWithGrace(const IrrigationSchedule& item, time_t nowTs, const t
     return true;
 }
 
-// Initialize actuator pins and load persisted configuration (Preferences/NVS).
-// Keeps defaults when stored values invalid. Called once from `setup()`.
 void ActuatorManager::begin() {
     pinMode(PUMP_PIN, OUTPUT);
     digitalWrite(PUMP_PIN, PUMP_OFF);
@@ -94,7 +92,6 @@ void ActuatorManager::begin() {
     Serial.println("s");
 }
 
-// Load persisted schedules from Preferences. Validates stored size and resets to empty on mismatch.
 void ActuatorManager::loadSchedulesFromStorage() {
     size_t expectedSize = sizeof(schedules);
     size_t storedSize = preferences.getBytesLength(SCHEDULES_STORAGE_KEY);
@@ -133,7 +130,6 @@ void ActuatorManager::loadSchedulesFromStorage() {
     }
 }
 
-// Persist current schedules into Preferences. Non-blocking small write; logs on failure.
 void ActuatorManager::saveSchedulesToStorage() {
     size_t bytesWritten = preferences.putBytes(SCHEDULES_STORAGE_KEY, schedules, sizeof(schedules));
     if (bytesWritten != sizeof(schedules)) {
@@ -141,9 +137,7 @@ void ActuatorManager::saveSchedulesToStorage() {
     }
 }
 
-// Turn pump ON: set physical pins, update state and log event.
 void ActuatorManager::ligar() {
-
     digitalWrite(PUMP_PIN, PUMP_ON);
     digitalWrite(PUMP_LED, PUMP_LED_ON);
 
@@ -152,7 +146,6 @@ void ActuatorManager::ligar() {
     Serial.println("🚿 Bomba ON");
 }
 
-// Turn pump OFF: clear pins, update state and log event.
 void ActuatorManager::desligar() {
     digitalWrite(PUMP_PIN, PUMP_OFF);
     digitalWrite(PUMP_LED, PUMP_LED_OFF);
@@ -197,7 +190,7 @@ void ActuatorManager::setDuracaoSegundos(int seconds) {
     } else {
         duracaoSegundos = seconds;
     }
-    _nvsDirty = true; // consolidado em flushConfig()
+    _nvsDirty = true; 
 }
 
 int ActuatorManager::getDuracaoSegundos() {
@@ -206,7 +199,7 @@ int ActuatorManager::getDuracaoSegundos() {
 
 void ActuatorManager::setThresholdUmidade(int threshold) {
     thresholdUmidade = threshold > 0 ? threshold : THRESHOLD_UMIDADE_PADRAO;
-    _nvsDirty = true; // consolidado em flushConfig()
+    _nvsDirty = true; 
 }
 
 int ActuatorManager::getThresholdUmidade() {
@@ -215,17 +208,13 @@ int ActuatorManager::getThresholdUmidade() {
 
 void ActuatorManager::setCooldownSegundos(int cooldown) {
     cooldownSegundos = cooldown > 0 ? cooldown : COOLDOWN_IRRIGACAO_PADRAO;
-    _nvsDirty = true; // consolidado em flushConfig()
+    _nvsDirty = true; 
 }
 
 int ActuatorManager::getCooldownSegundos() {
     return cooldownSegundos;
 }
 
-// Persiste duracao, threshold e cooldown em uma unica passagem pela NVS.
-// Deve ser chamado pelo caller (mqtt_manager) ao final do processamento de
-// um comando setConfig, nunca dentro dos setters individuais.
-// Nao-op se nenhum setter foi chamado desde o ultimo flush (_nvsDirty == false).
 void ActuatorManager::flushConfig() {
     if (!_nvsDirty) {
         return;
@@ -293,7 +282,6 @@ void ActuatorManager::clearSchedules() {
     Serial.println("[SCHEDULE] todos os agendamentos foram limpos da memoria");
 }
 
-// Insert or update a schedule by ID. Validates inputs and persists on success.
 bool ActuatorManager::upsertSchedule(const char* id, bool ativo, uint8_t diasMask, int hour, int minute, int durationSeconds, const char* createdAtIso) {
     if (id == nullptr || id[0] == '\0') {
         return false;
@@ -361,6 +349,13 @@ bool ActuatorManager::removeSchedule(const char* id) {
         if (strcmp(schedules[i].id, id) == 0) {
             schedules[i] = IrrigationSchedule();
             saveSchedulesToStorage();
+            
+            // SÊNIOR FIX: Mitigação de Split-brain / Deleção concorrente.
+            if (bombaLigada && currentTrigger == TRIGGER_SCHEDULE) {
+                activeUntil = millis();
+                Serial.println("[SCHEDULE] ALERTA: Agendamento ativo foi deletado. Forçando desligamento da bomba por timeout no proximo ciclo.");
+            }
+
             return true;
         }
     }
@@ -381,8 +376,6 @@ bool ActuatorManager::getStoredScheduleAtivo(const char* id, bool* outAtivo) con
     return false;
 }
 
-// Check if any schedule is due considering day mask and grace window.
-// If due, updates lastTriggerAt to prevent duplicates and returns true with schedule id.
 bool ActuatorManager::checkDueSchedule(time_t nowTs, int* outDurationSeconds, const char** outScheduleId) {
     if (outDurationSeconds == nullptr || outScheduleId == nullptr || nowTs <= 0) {
         return false;
@@ -419,8 +412,6 @@ bool ActuatorManager::checkDueSchedule(time_t nowTs, int* outDurationSeconds, co
 
     return false;
 }
-
-// ==================== RASTREAMENTO DE TRIGGER ====================
 
 void ActuatorManager::setCurrentTrigger(IrrigationTriggerType trigger) {
     currentTrigger = trigger;

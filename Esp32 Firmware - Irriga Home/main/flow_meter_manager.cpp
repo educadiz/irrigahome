@@ -9,7 +9,6 @@ FlowMeterManager* FlowMeterManager::_instance = nullptr;
 
 static const float LEGACY_FLOW_VOLUME_SCALE = 1.1489f;
 
-// Mutex para proteger _pulseCount durante acesso simultâneo
 static portMUX_TYPE flowMeterMux = portMUX_INITIALIZER_UNLOCKED;
 
 FlowMeterManager::FlowMeterManager()
@@ -31,10 +30,12 @@ float FlowMeterManager::getPulsesPerLiter() {
 
 void FlowMeterManager::begin() {
     _instance = this;
-    pinMode(FLOW_SENSOR_PIN, INPUT);  // INPUT simples, sem pull-up interno - deixar sensor fazer o pull-up
+    
+    // SÊNIOR FIX: Alterado de INPUT para INPUT_PULLUP para evitar pinos flutuantes.
+    pinMode(FLOW_SENSOR_PIN, INPUT_PULLUP);  
+    
     Serial.print("[FLOW] Sensor inicializado no GPIO ");
     Serial.println(FLOW_SENSOR_PIN);
-    // Carregar calibração persistida (se houver)
     loadCalibration();
 }
 
@@ -50,7 +51,6 @@ void FlowMeterManager::startMeasurement() {
     int rawLevel = digitalRead(FLOW_SENSOR_PIN);
     fwLogf("INFO", "FLOW", "Nivel bruto no GPIO %d: %s", FLOW_SENSOR_PIN, rawLevel == HIGH ? "HIGH" : "LOW");
 
-    // Attach ISR fora do crítico
     attachInterrupt(digitalPinToInterrupt(FLOW_SENSOR_PIN), FlowMeterManager::_isr, FALLING);
     fwLogf("INFO", "FLOW", "Medicao iniciada em GPIO %d; aguardando pulsos na borda de descida", FLOW_SENSOR_PIN);
 }
@@ -63,7 +63,6 @@ void FlowMeterManager::stopMeasurement() {
     _active = false;
     portEXIT_CRITICAL(&flowMeterMux);
     
-    // Debug detalhado de vazão
     uint32_t pulses = getTotalPulses();
     float rawLiters = (_pulsesPerLiter > 0.0f) ? (((float)pulses) / _pulsesPerLiter) : 0.0f;
     float rawMl = rawLiters * 1000.0f;
@@ -87,7 +86,6 @@ uint32_t FlowMeterManager::getTotalPulses() {
 float FlowMeterManager::getTotalVolumeLiters() {
     uint32_t pulses = getTotalPulses();
     if (_useLinearCalibration) {
-        // volume em mL = a * pulses + b
         float correctedMl = (_calib_a * (float)pulses) + _calib_b;
         if (correctedMl < 0.0f) correctedMl = 0.0f;
         return correctedMl / 1000.0f;
@@ -127,11 +125,9 @@ float FlowMeterManager::getVolumeCalibrationOffsetMl() {
 
 void FlowMeterManager::loadCalibration() {
     Preferences prefs;
-    // namespace 'flowcal'
     if (prefs.begin("flowcal", true)) {
         float s = prefs.getFloat("scale", _volumeScale);
         float o = prefs.getFloat("offset", _volumeOffsetMl);
-        // tentar carregar calibração linear (a,b)
         float a = prefs.getFloat("a", NAN);
         float b = prefs.getFloat("b", NAN);
         prefs.end();
@@ -148,7 +144,6 @@ void FlowMeterManager::loadCalibration() {
         portENTER_CRITICAL(&flowMeterMux);
         _volumeScale = s;
         _volumeOffsetMl = o;
-        // se a é válida, usar calibração linear
         if (!isnan(a)) {
             _calib_a = a;
             _calib_b = isnan(b) ? 0.0f : b;
@@ -308,12 +303,8 @@ void IRAM_ATTR FlowMeterManager::_isr() {
 }
 
 void IRAM_ATTR FlowMeterManager::handlePulse() {
-    // ISR crítica: apenas incrementar contador
-    // A mutex global flowMeterMux protege acesso simultâneo
-    // NUNCA fazer Serial.print() dentro de ISR - causa watchdog timeout!
     extern portMUX_TYPE flowMeterMux;
     portENTER_CRITICAL_ISR(&flowMeterMux);
     _pulseCount = _pulseCount + 1;
     portEXIT_CRITICAL_ISR(&flowMeterMux);
 }
-

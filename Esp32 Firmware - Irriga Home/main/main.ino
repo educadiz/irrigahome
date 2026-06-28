@@ -10,7 +10,7 @@
 #include "display_manager.h"
 #include "irrigation_event_manager.h"
 #include "flow_meter_manager.h"
-#include "web_server_manager.h"  // ← ADICIONADO
+#include "web_server_manager.h"
 #include "firmware_logger.h"
 #include "config.h"
 #include <time.h>
@@ -24,7 +24,7 @@ ActuatorManager atuador;
 DisplayManager displayManager;
 IrrigationEventManager irrigationEventManager;
 FlowMeterManager flowMeter;
-WebServerManager webServer;  // ← ADICIONADO
+WebServerManager webServer;
 
 // ===========================================================================
 // stopIrrigation — ponto único de desligamento da bomba.
@@ -67,19 +67,6 @@ void setup() {
     if (!wdtInitialized) {
         wdtInitialized = true;
 
-        // CORREÇÃO: idle_core_mask = (1 << 0) | (1 << 1) = 3 faz o IDF adicionar
-        // automaticamente as tasks IDLE de ambos os cores ao TWDT, o que fazia a
-        // IDLE0 ser monitorada e falhar quando mqttConnectTask monopolizava o Core 0
-        // durante o handshake TLS.
-        //
-        // Com idle_core_mask = 0 o TWDT NÃO monitora nenhuma IDLE automaticamente.
-        // Apenas a loopTask (registrada via esp_task_wdt_add(NULL) abaixo) é vigiada.
-        // Isso elimina o falso-positivo causado pelo bloqueio TLS no Core 0.
-        //
-        // timeout_ms = 30 s: cobre o pior caso do handshake TLS com HiveMQ Cloud
-        // (certificado + TCP setup em rede instável pode ultrapassar 15 s).
-        // O loop principal reseta o WDT a cada ~2 s (CONTROL_INTERVAL_MS), então
-        // 30 s ainda detecta travamentos reais com folga.
         esp_task_wdt_config_t wdtConfig = {
             .timeout_ms   = 30000UL,  // 30 s — cobre handshake TLS do HiveMQ Cloud
             .idle_core_mask = 0,      // NÃO monitora IDLE automaticamente
@@ -97,6 +84,11 @@ void setup() {
     fwLogSection("SETUP", "Sensores");
     sensores.begin();
     fwLogLine("INFO", "SETUP", "Sensores inicializados");
+    
+    // ===== CARREGA O OWNER UID DO ARMAZENAMENTO =====
+    // Se não existir, usa o valor padrão de secrets.h
+    String ownerUid = getOwnerUid();
+    fwLogf("INFO", "SETUP", "Owner UID: %s", ownerUid.c_str());
     
     //Isso aqui apaga registros indesejaveis na NVS e zera tudo!
     // ⚠️ LIMPEZA EMERGENCIAL DA NVS — remover após confirmar display "Agendado: 0"
@@ -125,13 +117,9 @@ void setup() {
     mqtt.begin(irrigationEventManager);  // injeta referencia — elimina extern implicito
     fwLogLine("INFO", "SETUP", "Cliente MQTT inicializado");
 
-    // ← ADICIONADO: inicia o servidor web de manutenção (task no Core 0)
-    // Chamado após mqtt.begin() — WiFi já foi iniciado por wifi.connect().
-    // O IP é exibido no Serial assim que a conexão for estabelecida no loop().
     fwLogSection("SETUP", "Servidor web de manutencao");
     webServer.begin(sensores, atuador, flowMeter);
     fwLogLine("INFO", "SETUP", "Servidor web inicializado");
-    // ← FIM
     
     fwLogSection("SETUP", "Display");
     displayManager.begin();
@@ -177,8 +165,6 @@ void loop() {
     }
 
     if ((now - lastControlTick) < CONTROL_INTERVAL_MS) {
-        // Cede o processador ao scheduler sem alimentar o WDT.
-        // Se wifi/mqtt/display travarem aqui, o WDT de 15 s expira normalmente.
         vTaskDelay(1);
         return;
     }
@@ -187,9 +173,8 @@ void loop() {
     // Alimentar watchdog ao iniciar o bloco de controle
     esp_task_wdt_reset();
 
-    // ← ADICIONADO: aplica calibrações recebidas via página web (executa no Core 1)
+    // Aplica calibrações recebidas via página web (executa no Core 1)
     webServer.applyPendingConfig();
-    // ← FIM
 
     SensorData data = sensores.read();
 
@@ -200,7 +185,6 @@ void loop() {
     }
 
     // ===== SEGURANCA (FIM POR FALTA DE AGUA) =====
-    // Inclui pedidos sinalizados pelo mqtt_manager via requestStopIrrigation().
     if (!data.nivelAgua || mqtt.isStopRequested()) {
         if (atuador.isLigado()) {
             IrrigationStopReason reason = !data.nivelAgua
@@ -218,12 +202,11 @@ void loop() {
     // ===== MODO AUTOMATICO =====
     bool condicaoAutoValida = atuador.isModoAuto() && data.nivelAgua;
     if (!condicaoAutoValida) {
-        // Evita reaproveitar janela antiga de solo seco ao voltar para AUTO.
         soloSecoDesde = 0;
         soloUmidoAltoDesde = 0;
     }
 
-    // ===== PROTECAO POR EXCESSO DE UMIDADE (bloqueia agenda E automatico) =====
+    // ===== PROTECAO POR EXCESSO DE UMIDADE =====
     bool bloquearPorSoloUmido = false;
     if (atuador.isModoAuto() && data.nivelAgua) {
         if (data.umidadeSolo >= SOLO_UMIDO_BLOQUEIO_PCT) {
@@ -237,10 +220,7 @@ void loop() {
             ((now - soloUmidoAltoDesde) >= SOLO_UMIDO_BLOQUEIO_PERSISTENCIA_MS);
     }
 
-    // ===== AGENDAMENTOS — independente do modoAuto =====
-    // Agendas disparam mesmo em modo Manual, desde que haja agua,
-    // relogio sincronizado, bomba desligada e solo nao excessivamente umido.
-    // Cooldown de agenda usa lastScheduleTrigger (separado do automatico por sensor).
+    // ===== AGENDAMENTOS =====
     if (wifi.isClockReady() && data.nivelAgua && !atuador.isLigado() && !bloquearPorSoloUmido) {
         int scheduleDuration = 0;
         const char* scheduleId = nullptr;
@@ -251,21 +231,19 @@ void loop() {
             atuador.ligar();
             irrigationEventManager.onIrrigationStart(TRIGGER_SCHEDULE);
             atuador.setActiveUntil(now + ((unsigned long)durationToUse * 1000UL));
-            // Cooldown de agenda: usa contador proprio, nao interfere com o automatico por sensor
             atuador.setLastScheduleTrigger(now);
 
             fwLogf("INFO", "SCHEDULE", "Disparado id=%s duracao=%ds", scheduleId != nullptr ? scheduleId : "unknown", durationToUse);
         }
     }
 
-    // ===== AUTOMATICO POR REGRA DE SOLO (requer modoAuto) =====
+    // ===== AUTOMATICO POR REGRA DE SOLO =====
     if (condicaoAutoValida) {
         int threshold = atuador.getThresholdUmidade();
         int cooldown = atuador.getCooldownSegundos();
         unsigned long lastTrigger = atuador.getLastAutoTrigger();
         unsigned long timeSinceLastTrigger = (now >= lastTrigger) ? (now - lastTrigger) : 0;
 
-        // Verificar se pode acionar de novo (passou o cooldown)
         bool canTrigger = (timeSinceLastTrigger >= ((unsigned long)cooldown * 1000UL));
 
         if (data.umidadeSolo < threshold) {
@@ -275,13 +253,11 @@ void loop() {
 
             bool secoPersistente = (now - soloSecoDesde) >= SOLO_SECO_PERSISTENCIA_MS;
             if (secoPersistente && !bloquearPorSoloUmido && !atuador.isLigado() && canTrigger) {
-                // Solo seco persistente por 1 minuto e bomba OFF -> LIGAR
                 atuador.setCurrentTrigger(TRIGGER_AUTOMATIC);
                 atuador.ligar();
                 irrigationEventManager.onIrrigationStart(TRIGGER_AUTOMATIC);
                 atuador.setActiveUntil(now + ((unsigned long)atuador.getDuracaoSegundos() * 1000UL));
                 atuador.setLastAutoTrigger(now);
-                // Exige nova janela continua de solo seco para o proximo acionamento.
                 soloSecoDesde = 0;
                 fwLogf("INFO", "AUTO", "Solo=%d%% abaixo do threshold=%d%%; iniciando irrigacao", data.umidadeSolo, threshold);
             }
@@ -290,9 +266,26 @@ void loop() {
         }
     }
 
-    // Reset do watchdog: executado UMA vez ao final de cada iteração completa.
-    // Garante que qualquer travamento em wifi/mqtt/display/irrigação seja detectado
-    // dentro do timeout de 8 s — múltiplos resets intermediários mascaravam falhas.
-    esp_task_wdt_reset();
+    // ===== ENVIO DE EVENTOS PARA O FIREBASE =====
+    // O envio ao Firebase e' feito exclusivamente por MqttManager::loop()
+    // (mqtt.loop(), chamado no topo deste loop()), via fila FreeRTOS
+    // nao-bloqueante (firebaseQueue/firebaseTask). Esse e' o UNICO
+    // consumidor de getNextPendingEvent() no firmware.
+    //
+    // ANTERIORMENTE havia um segundo consumidor aqui (FirebaseSender::
+    // sendPendingEvents(), a cada 30s) que chamava a MESMA fila
+    // (irrigationEventManager.getNextPendingEvent). Como getNextPendingEvent()
+    // consome/avanca o item da fila, os dois consumidores competiam pelo
+    // mesmo evento: o mqtt.loop() (que roda a cada poucos ms) quase sempre
+    // "ganhava a corrida" e consumia o evento antes do ciclo de 30s deste
+    // bloco rodar — fazendo o envio real depender de timing, em vez de ser
+    // deterministico. Alem disso, o FirebaseSender usava HTTPClient sem
+    // WiFiClientSecure configurado para a URL HTTPS, e fazia delay()
+    // bloqueante dentro do loop principal (risco para o watchdog e para a
+    // logica de seguranca da bomba). Por isso foi removido daqui; ver
+    // firebase_sender.h — mantido no projeto apenas como utilitario
+    // standalone, nao deve ser chamado a partir do loop() principal.
 
+    // Reset do watchdog
+    esp_task_wdt_reset();
 }

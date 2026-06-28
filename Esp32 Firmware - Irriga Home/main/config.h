@@ -4,6 +4,8 @@
 
 #include <Arduino.h>
 #include <WiFi.h>
+#include <FS.h>
+#include <LittleFS.h>
 
 #pragma once
 
@@ -34,6 +36,34 @@ static inline String getMqttCommandsTopic() {
 	return String("irrigahome/") + getDeviceIdFromMac() + "/commands";
 }
 
+// Funções para gerenciamento do Owner UID
+static inline String getOwnerUid() {
+    if (LittleFS.begin()) {
+        if (LittleFS.exists(OWNER_UID_STORAGE)) {
+            File f = LittleFS.open(OWNER_UID_STORAGE, "r");
+            if (f) {
+                String uid = f.readString();
+                uid.trim();
+                f.close();
+                if (uid.length() > 0) {
+                    return uid;
+                }
+            }
+        }
+    }
+    return String(DEFAULT_OWNER_UID);
+}
+
+static inline void setOwnerUid(const String& uid) {
+    if (LittleFS.begin()) {
+        File f = LittleFS.open(OWNER_UID_STORAGE, "w");
+        if (f) {
+            f.print(uid);
+            f.close();
+        }
+    }
+}
+
 // PINOS
 #define DHTPIN 4
 #define RESET 27
@@ -43,17 +73,13 @@ static inline String getMqttCommandsTopic() {
 #define PUMP_PIN 18
 #define PUMP_LED 2  
 #define FLOW_SENSOR_PIN 23
-#define FLOW_PULSES_PER_LITER 260000  // calibrado: 13000 pulsos = 50 mL -> 260000 pulsos/L
-// Volume real aferido a partir da nova referencia do sensor.
-// Com 13000 pulsos medidos para 50 mL, o fator base passa a ser 1.0.
+#define FLOW_PULSES_PER_LITER 260000
 #define FLOW_VOLUME_SCALE 1.0f
 #define FLOW_VOLUME_OFFSET_ML 0.0f
 #define PUMP_NOMINAL_FLOW_ML_PER_MIN 600.0f
 #define PUMP_NOMINAL_FLOW_LPM (PUMP_NOMINAL_FLOW_ML_PER_MIN / 1000.0f)
 
 // DISPLAY
-// Novo painel TFT ST7789 240x320. Os pinos SDA/SCL do modulo sao reaproveitados
-// como linhas SPI de dados/clock para manter a mesma base de cabeamento.
 #define SCREEN_WIDTH 240
 #define SCREEN_HEIGHT 320
 #define DISPLAY_SDA_PIN 21
@@ -70,9 +96,6 @@ static inline String getMqttCommandsTopic() {
 // SOLO
 #define SOLO_SECO 4095
 #define SOLO_UMIDO 0
-// Numero de amostras ADC consecutivas para media do solo.
-// O ADC do ESP32 e' ruidoso quando o radio WiFi esta ativo; 6 amostras
-// reduzem o desvio sem bloquear o loop (cada analogRead leva ~10 us).
 #define SOIL_ADC_SAMPLES 6
 
 // ACIONAMENTO DA BOMBA
@@ -90,6 +113,3 @@ static inline String getMqttCommandsTopic() {
 // Protecao: irrigacao por agenda ou regra automatica so se solo < limiar (com persistencia)
 #define SOLO_UMIDO_BLOQUEIO_PCT 75
 #define SOLO_UMIDO_BLOQUEIO_PERSISTENCIA_MS 60000UL
-
-// FIREBASE CLOUD FUNCTIONS
-// FIREBASE_PROJECT_URL agora definido em secrets.h

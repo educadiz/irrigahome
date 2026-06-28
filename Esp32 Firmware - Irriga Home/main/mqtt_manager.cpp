@@ -8,6 +8,7 @@
 #include "irrigation_event_manager.h"
 #include "flow_meter_manager.h"
 #include "firmware_logger.h"
+#include "firebase_payload_builder.h"
 #include <Arduino.h>
 #include <WiFi.h>
 #include <freertos/FreeRTOS.h>
@@ -45,18 +46,9 @@ static unsigned long lastHeartbeat = 0;
 static unsigned long reconnectBackoffMs = 5000UL;
 static bool mqttWasConnected = false;
 static MqttManager* mqttManagerInstance = nullptr;
-// Ponteiro para o IrrigationEventManager injetado em begin().
-// Usado pelos helpers estaticos (callback, connectMQTT) que nao recebem 'this'.
 static IrrigationEventManager* g_eventMgr = nullptr;
 
 // Controle de eventos ja enfileirados para o Firebase nesta sessao (RAM).
-// Necessario porque um evento pode permanecer na fila RAM do IrrigationEventManager
-// por varios ciclos de loop() enquanto o MQTT falha em publicar (retry) — sem este
-// controle, sendIrrigationEventToFirebase() seria chamado repetidamente para o
-// mesmo evento a cada ~poucos segundos, inundando a fila do Firebase (capacidade 4).
-// Nao precisa ser persistente: se reiniciar antes do Firebase confirmar, o controle
-// definitivo (sentToFirebase no JSONL via removeFromHistory) continua garantindo
-// a entrega em ciclos futuros.
 static const int MAX_FIREBASE_ENQUEUED_IDS = 16;
 static char firebaseEnqueuedIds[MAX_FIREBASE_ENQUEUED_IDS][24];
 static int firebaseEnqueuedCount = 0;
@@ -83,17 +75,11 @@ static void markEnqueuedForFirebase(const char* eventId) {
     }
 }
 
-// Conexão assíncrona para evitar bloqueio do loop principal (task watchdog)
-// Precisa ser visível entre Core 0 e Core 1 sem cache agressivo.
+// Conexão assíncrona
 static volatile bool connectTaskRunning = false;
-static volatile bool mqttConnectingInProgress = false;  // Flag para indicar que client.connect() está em andamento
-// Sinaliza ao loop() (Core 1) que a conexão foi bem-sucedida e ele deve
-// executar subscribe/publish/reset-de-estado em seu próprio contexto.
-// Nunca acessar sensores/atuador/client a partir do Core 0 diretamente.
+static volatile bool mqttConnectingInProgress = false;
 static volatile bool mqttJustConnected = false;
 static void mqttConnectTask(void* pvParameters);
-// TLS handshake do WiFiClientSecure pode consumir stack acima de 16 KB.
-// 32 KB evita overflow intermitente e corrupção de heap durante connect().
 static constexpr uint32_t MQTT_CONNECT_TASK_STACK_BYTES = 32768;
 static portMUX_TYPE mqttConnectMux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -127,7 +113,6 @@ static void flushPendingStatusPublish() {
         return;
     }
     
-    // Copiar payload antes de liberar o mutex para evitar TOCTOU
     char payload[160];
     strncpy(payload, pendingStatusPayload, sizeof(payload) - 1);
     payload[sizeof(payload) - 1] = '\0';
@@ -141,16 +126,11 @@ static void flushPendingStatusPublish() {
     }
 }
 
-// Referencias externas
 extern SensorManager sensores;
 extern ActuatorManager atuador;
-// IrrigationEventManager e' injetado via MqttManager::begin() — sem extern.
 
 // ==================== FREERTOS: FILA E TASK FIREBASE ====================
 
-// Estrutura que trafega pela fila — todos os campos copiados por valor
-// para evitar acesso a memoria liberada quando a task executar.
-//
 struct FirebaseEventPayload {
     char eventId[24];
     char startAtIso[32];
@@ -158,12 +138,11 @@ struct FirebaseEventPayload {
     int  durationSec;
     char triggerType[16];
     char stopReason[16];
-    bool success;          // true somente quando stopReason == STOP_REASON_COMPLETED
+    bool success;
     int  soilHumidity;
     int  airHumidity;
     float temperature;
     char waterLevel[10];
-    // Flow sensor
     uint32_t totalPulses;
     float totalVolumeLiters;
     float avgFlowRateLpm;
@@ -172,17 +151,14 @@ struct FirebaseEventPayload {
     float nominalFlowRateMlPerMin;
     bool flowDetected;
     char flowStatus[16];
+    // Novo campo para armazenar o payload JSON completo
+    char jsonPayload[1024];
 };
 
 static QueueHandle_t firebaseQueue = nullptr;
 
 // ==================== SINCRONIZACAO DE AGENDAMENTOS ====================
-// Fila de sinal para a syncTask: tamanho 1, sem dados (apenas gatilho).
-// A task verifica _scheduleSyncRunning antes de iniciar para evitar dupla execução.
 static QueueHandle_t scheduleSyncQueue = nullptr;
-
-// Ponteiro global para o MqttManager (sincronismo de flags entre cores).
-// Já existia como mqttManagerInstance; usamos aqui via cast para acessar membros.
 
 static void scheduleSyncTask(void* pvParameters) {
     for (;;) {
@@ -199,8 +175,6 @@ static void scheduleSyncTask(void* pvParameters) {
     }
 }
 
-// Estrutura que representa um agendamento retornado pelo endpoint getDeviceSchedules.
-// Campos mantidos simples para não depender de biblioteca JSON no firmware.
 struct FirestoreScheduleEntry {
     char id[64];
     bool ativo;
@@ -211,90 +185,98 @@ struct FirestoreScheduleEntry {
     char createdAt[32];
 };
 
-// Tamanho máximo de agendamentos que o endpoint pode retornar.
-// Pode ser maior que MAX_SCHEDULES; apenas os primeiros MAX_SCHEDULES serão aplicados.
 static const int MAX_FIRESTORE_SCHEDULES = 16;
 
-// ==================== FIM SINCRONIZACAO ====================
+// ==================== TASK FIREBASE (CORRIGIDA) ====================
 
-// Task dedicada ao envio HTTP para o Firebase.
-// Roda no Core 0 (protocolo), separado do loop principal (Core 1),
-// com stack generosa para TLS + HTTPClient.
-//
 static void firebaseTask(void* pvParameters) {
     FirebaseEventPayload payload;
-
-    // NAO registrar esta task no Task WDT (esp_task_wdt_add).
-    // http.GET() + TLS podem bloquear por varios segundos sem retorno ao codigo;
-    // com registro, o TWDT exige esp_task_wdt_reset() dentro do timeout global
-    // (ex.: 8 s) e dispara panic mesmo com o loop principal saudavel no Core 1.
-    // O watchdog continua sendo alimentado apenas pelo loopTask (main.ino).
+    char url[1024];
 
     for (;;) {
         if (xQueueReceive(firebaseQueue, &payload, portMAX_DELAY) == pdTRUE) {
 
             if (WiFi.status() != WL_CONNECTED) {
-                // Sem WiFi, o envio ao Firebase fica aguardando um novo ciclo.
                 Serial.println("[FIREBASE] sem WiFi, envio adiado (sera retentado apos reconexao)");
                 continue;
             }
 
-            String firebaseUrl = String(FIREBASE_PROJECT_URL) + "/saveIrrigationEvent";
-            String url = firebaseUrl;
-            url += "?deviceId=" + getDeviceIdFromMac();
-            url += "&historyCollection=" + String(HISTORY_COLLECTION_NAME);
-            url += "&eventId="  + String(payload.eventId);
-            url += "&startAt="  + String(payload.startAtIso);
+            // ===== CORREÇÃO: Usar o payload JSON completo =====
+            if (payload.jsonPayload[0] != '\0') {
+                WiFiClientSecure httpsClient;
+                httpsClient.setInsecure();
+                httpsClient.setTimeout(10);
 
-            if (payload.endAtIso[0] != '\0') {
-                url += "&endAt=" + String(payload.endAtIso);
-            }
+                HTTPClient http;
+                http.begin(httpsClient, FIREBASE_SAVE_EVENT_URL);
+                http.addHeader("Content-Type", "application/json");
+                http.setTimeout(5000);
 
-            url += "&durationSec=" + String(payload.durationSec);
-            url += "&trigger="     + String(payload.triggerType);
-            url += "&stopReason="  + String(payload.stopReason);
-            url += "&success="     + String(payload.success ? "true" : "false");
+                Serial.print("[FIREBASE] Enviando JSON para: ");
+                Serial.println(FIREBASE_SAVE_EVENT_URL);
+                Serial.print("[FIREBASE] Payload: ");
+                Serial.println(payload.jsonPayload);
 
-            if (payload.soilHumidity > 0) {
-                url += "&soilHumidity=" + String(payload.soilHumidity);
-            }
-            if (payload.airHumidity > 0) {
-                url += "&airHumidity=" + String(payload.airHumidity);
-            }
-            if (payload.temperature > 0.0f) {
-                url += "&temperature=" + String(payload.temperature, 2);
-            }
-            // waterLevel é sempre enviado — "Vazio" é informação crítica para o histórico
-            url += "&waterLevel=" + String(payload.waterLevel);
+                int httpCode = http.POST(payload.jsonPayload);
 
-            // Campos contábeis sempre enviados
-            url += "&accountingVolumeMl=" + String(payload.accountingVolumeMl, 1);
-            url += "&nominalFlowRateMlPerMin=" + String(payload.nominalFlowRateMlPerMin, 1);
-
-            // Flow sensor (quando medido)
-            if (payload.totalPulses > 0 || payload.totalVolumeLiters > 0.0f || payload.totalVolumeMl > 0.0f) {
-                url += "&totalPulses=" + String(payload.totalPulses);
-                url += "&totalVolumeLiters=" + String(payload.totalVolumeLiters, 3);
-                url += "&avgFlowRateLpm=" + String(payload.avgFlowRateLpm, 3);
-                url += "&totalVolumeMl=" + String(payload.totalVolumeMl, 1);
-                url += "&flowDetected=" + String(payload.flowDetected ? "true" : "false");
-                if (payload.flowStatus[0] != '\0') {
-                    url += "&flowStatus=" + String(payload.flowStatus);
+                if (httpCode > 0) {
+                    if (httpCode == 200 || httpCode == 201) {
+                        fwLogf("INFO", "FIREBASE", "Evento gravado com sucesso: %s", payload.eventId);
+                        if (g_eventMgr) {
+                            g_eventMgr->removeFromHistory(payload.eventId);
+                        }
+                    } else {
+                        fwLogf("WARN", "FIREBASE", "Codigo HTTP: %d", httpCode);
+                        String response = http.getString();
+                        fwLogf("WARN", "FIREBASE", "Resposta: %s", response.c_str());
+                    }
+                } else {
+                    fwLogf("ERROR", "FIREBASE", "Erro HTTP: %s", http.errorToString(httpCode).c_str());
                 }
+
+                http.end();
+                vTaskDelay(pdMS_TO_TICKS(10));
+                continue;
             }
 
-            Serial.print("[FIREBASE] Enviando evento: ");
+            // ===== FALLBACK: URL com parâmetros GET (compatibilidade) =====
+            snprintf(url, sizeof(url),
+                "%s?macAddress=%s&historyCollection=events&ownerUid=%s&eventId=%s&startAt=%s&endAt=%s&durationSec=%d&trigger=%s&stopReason=%s&success=%s&soilHumidity=%d&airHumidity=%d&temperature=%.2f&waterLevel=%s&totalPulses=%u&totalVolumeLiters=%.3f&avgFlowRateLpm=%.3f&totalVolumeMl=%.1f&accountingVolumeMl=%.1f&nominalFlowRateMlPerMin=%.1f&flowDetected=%s&flowStatus=%s&createdAt=%s&updatedAt=%s",
+                FIREBASE_SAVE_EVENT_URL,
+                getDeviceIdFromMac().c_str(),
+                getOwnerUid().c_str(),
+                payload.eventId,
+                payload.startAtIso,
+                payload.endAtIso,
+                payload.durationSec,
+                payload.triggerType,
+                payload.stopReason,
+                payload.success ? "true" : "false",
+                payload.soilHumidity,
+                payload.airHumidity,
+                payload.temperature,
+                payload.waterLevel,
+                (unsigned)payload.totalPulses,
+                payload.totalVolumeLiters,
+                payload.avgFlowRateLpm,
+                payload.totalVolumeMl,
+                payload.accountingVolumeMl,
+                payload.nominalFlowRateMlPerMin,
+                payload.flowDetected ? "true" : "false",
+                payload.flowStatus,
+                payload.startAtIso,
+                payload.endAtIso
+            );
+
+            Serial.print("[FIREBASE] Enviando evento (GET): ");
             Serial.println(url);
 
-            // WiFiClientSecure e HTTPClient sao criados dentro da task
-            // para evitar conflitos com o cliente TLS do MQTT (espClient).
             WiFiClientSecure httpsClient;
-            httpsClient.setInsecure(); // Para desenvolvimento
+            httpsClient.setInsecure();
             httpsClient.setTimeout(10);
 
             HTTPClient http;
             http.begin(httpsClient, url);
-            // Limite de espera da camada HTTP (TLS pode somar tempo antes disso).
             http.setTimeout(5000);
 
             int httpCode = http.GET();
@@ -302,7 +284,6 @@ static void firebaseTask(void* pvParameters) {
             if (httpCode > 0) {
                 if (httpCode == 200) {
                     fwLogf("INFO", "FIREBASE", "Evento gravado: %s", payload.eventId);
-                    // Remove do JSONL — única ação que impede reenvio após reboot.
                     if (g_eventMgr) {
                         g_eventMgr->removeFromHistory(payload.eventId);
                     }
@@ -316,20 +297,13 @@ static void firebaseTask(void* pvParameters) {
             }
 
             http.end();
-
-            // Yield explicito para o scheduler apos operacao longa
             vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 }
 
-// Encapsula o envio real: apenas copia o payload para a fila e retorna imediatamente.
-// O loop principal nao bloqueia; a firebaseTask cuida do HTTP de forma assincrona.
-//
-// THREAD-SAFETY: getStopReasonString() e' chamado aqui, no contexto do loop principal
-// (Core 1), antes de qualquer enfileiramento. O resultado — uma string literal estatica —
-// e' copiado por valor para FirebaseEventPayload. A firebaseTask (Core 0) nunca acessa
-// g_eventMgr diretamente; opera apenas sobre a copia local do payload.
+// ==================== ENVIO PARA FIREBASE (CORRIGIDO) ====================
+
 void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
                                                  const char* startAtIso,
                                                  const char* endAtIso,
@@ -363,61 +337,76 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
         return;
     }
 
-    FirebaseEventPayload payload = {};
-    strncpy(payload.eventId,    eventId,    sizeof(payload.eventId)    - 1);
-    strncpy(payload.startAtIso, startAtIso, sizeof(payload.startAtIso) - 1);
-    strncpy(payload.endAtIso,   endAtIso ? endAtIso : "", sizeof(payload.endAtIso) - 1);
-    strncpy(payload.triggerType, triggerType, sizeof(payload.triggerType) - 1);
-    // getStopReasonString() retorna literal estatico — seguro copiar aqui (Core 1)
-    // sem que a firebaseTask (Core 0) precise acessar g_eventMgr.
-    strncpy(payload.stopReason,
-            g_eventMgr->getStopReasonString(stopReason),
-            sizeof(payload.stopReason) - 1);
-    payload.success      = (stopReason == STOP_REASON_COMPLETED);
-    payload.durationSec  = durationSec;
-    payload.soilHumidity = soilHumidity;
-    payload.airHumidity  = airHumidity;
-    payload.temperature  = temperature;
-    payload.totalPulses = totalPulses;
-    payload.totalVolumeLiters = totalVolumeLiters;
-    payload.avgFlowRateLpm = avgFlowRateLpm;
-    payload.totalVolumeMl = totalVolumeMl;
-    payload.accountingVolumeMl = accountingVolumeMl;
-    payload.nominalFlowRateMlPerMin = nominalFlowRateMlPerMin;
-    payload.flowDetected = flowDetected;
-    strncpy(payload.flowStatus, flowStatus ? flowStatus : "", sizeof(payload.flowStatus) - 1);
-    strncpy(payload.waterLevel, waterLevel ? "Cheio" : "Vazio", sizeof(payload.waterLevel) - 1);
-    payload.waterLevel[sizeof(payload.waterLevel) - 1] = '\0';
-    
-    // DEBUG: Log dos dados de vazão sendo enfileirados
-    Serial.print("[FIREBASE-QUEUE] Evento enfileirado - ID: ");
-    Serial.print(payload.eventId);
-    Serial.print(" | Pulsos: ");
-    Serial.print(payload.totalPulses);
-    Serial.print(" | Volume: ");
-    Serial.print(payload.totalVolumeLiters, 3);
-    Serial.print("L (" );
-    Serial.print(payload.totalVolumeMl, 1);
-    Serial.print(" mL) | Contabil: ");
-    Serial.print(payload.accountingVolumeMl, 1);
-    Serial.print(" mL @ ");
-    Serial.print(payload.nominalFlowRateMlPerMin, 1);
-    Serial.print(" mL/min | Status: ");
-    Serial.println(payload.flowStatus);
+    // ===== CONSTRUIR PAYLOAD COMPLETO COM O BUILDER =====
+    IrrigationEvent event;
+    event.used = true;
+    strncpy(event.eventId, eventId, sizeof(event.eventId) - 1);
+    event.startAt = (time_t)atol(startAtIso);
+    event.endAt = (time_t)atol(endAtIso);
+    event.durationSec = durationSec;
+    event.trigger = TRIGGER_UNKNOWN;
+    event.stopReason = stopReason;
+    event.totalPulses = totalPulses;
+    event.totalVolumeLiters = totalVolumeLiters;
+    event.avgFlowRateLpm = avgFlowRateLpm;
+    event.totalVolumeMl = totalVolumeMl;
+    event.accountingVolumeMl = accountingVolumeMl;
+    event.nominalFlowRateMlPerMin = nominalFlowRateMlPerMin;
+    event.flowDetected = flowDetected;
+    strncpy(event.flowStatus, flowStatus ? flowStatus : "", sizeof(event.flowStatus) - 1);
 
-    // xQueueSend nao bloqueia (timeout 0): se a fila estiver cheia, loga e descarta.
-    if (xQueueSend(firebaseQueue, &payload, 0) != pdTRUE) {
+    // ===== USAR O BUILDER PARA CRIAR O PAYLOAD JSON =====
+    String payload = FirebasePayloadBuilder::buildFullPayload(
+        event,
+        soilHumidity,
+        airHumidity,
+        temperature,
+        waterLevel
+    );
+
+    // ===== PREENCHER O PAYLOAD PARA A FILA =====
+    FirebaseEventPayload firebasePayload = {};
+    strncpy(firebasePayload.eventId, eventId, sizeof(firebasePayload.eventId) - 1);
+    strncpy(firebasePayload.startAtIso, startAtIso, sizeof(firebasePayload.startAtIso) - 1);
+    strncpy(firebasePayload.endAtIso, endAtIso ? endAtIso : "", sizeof(firebasePayload.endAtIso) - 1);
+    strncpy(firebasePayload.triggerType, triggerType, sizeof(firebasePayload.triggerType) - 1);
+    strncpy(firebasePayload.stopReason,
+            g_eventMgr->getStopReasonString(stopReason),
+            sizeof(firebasePayload.stopReason) - 1);
+    firebasePayload.success = (stopReason == STOP_REASON_COMPLETED);
+    firebasePayload.durationSec = durationSec;
+    firebasePayload.soilHumidity = soilHumidity;
+    firebasePayload.airHumidity = airHumidity;
+    firebasePayload.temperature = temperature;
+    firebasePayload.totalPulses = totalPulses;
+    firebasePayload.totalVolumeLiters = totalVolumeLiters;
+    firebasePayload.avgFlowRateLpm = avgFlowRateLpm;
+    firebasePayload.totalVolumeMl = totalVolumeMl;
+    firebasePayload.accountingVolumeMl = accountingVolumeMl;
+    firebasePayload.nominalFlowRateMlPerMin = nominalFlowRateMlPerMin;
+    firebasePayload.flowDetected = flowDetected;
+    strncpy(firebasePayload.flowStatus, flowStatus ? flowStatus : "", sizeof(firebasePayload.flowStatus) - 1);
+    strncpy(firebasePayload.waterLevel, waterLevel ? "Cheio" : "Vazio", sizeof(firebasePayload.waterLevel) - 1);
+    firebasePayload.waterLevel[sizeof(firebasePayload.waterLevel) - 1] = '\0';
+    
+    // ===== ARMAZENAR O JSON COMPLETO NA FILA =====
+    strncpy(firebasePayload.jsonPayload, payload.c_str(), sizeof(firebasePayload.jsonPayload) - 1);
+    firebasePayload.jsonPayload[sizeof(firebasePayload.jsonPayload) - 1] = '\0';
+
+    Serial.print("[FIREBASE-QUEUE] Evento enfileirado - ID: ");
+    Serial.print(eventId);
+    Serial.print(" | Payload size: ");
+    Serial.println(payload.length());
+
+    // ===== ENFILEIRAR O PAYLOAD COMPLETO =====
+    if (xQueueSend(firebaseQueue, &firebasePayload, 0) != pdTRUE) {
         fwLogLine("WARN", "FIREBASE", "Fila cheia; evento descartado");
     }
 }
 
 // ==================== SINCRONIZACAO DE AGENDAMENTOS ====================
 
-// Helpers de parse mínimos para o JSON retornado pelo endpoint getDeviceSchedules.
-// Evita dependência de biblioteca JSON no firmware.
-
 static bool syncParseString(const char* json, int jsonLen, const char* key, char* outBuf, int outBufLen) {
-    // Busca "key":"valor"
     char token[72];
     snprintf(token, sizeof(token), "\"%s\":\"", key);
     const char* pos = strstr(json, token);
@@ -459,9 +448,6 @@ static bool syncParseInt(const char* json, const char* key, int* outVal) {
     return true;
 }
 
-// Converte array JSON de inteiros de diasSemana (ex: [1,3,5]) em bitmask 0..6
-// onde bit 0 = domingo, bit 1 = segunda, ... bit 6 = sábado.
-// Convenção Firestore: 1=domingo, 2=segunda, ..., 7=sábado.
 static uint8_t syncParseDiasMask(const char* json) {
     const char* keyPos = strstr(json, "\"diasSemana\":");
     if (!keyPos) return 0;
@@ -472,7 +458,6 @@ static uint8_t syncParseDiasMask(const char* json) {
     while (*p && *p != ']') {
         if (*p >= '0' && *p <= '9') {
             int val = (int)strtol(p, nullptr, 10);
-            // Firestore: 1=domingo...7=sábado → firmware: 0=domingo...6=sábado
             if (val >= 1 && val <= 7) mask |= (1U << (val - 1));
         }
         while (*p && *p != ',' && *p != ']') p++;
@@ -481,8 +466,6 @@ static uint8_t syncParseDiasMask(const char* json) {
     return mask;
 }
 
-// Extrai a próxima substring de objeto JSON {...} a partir de `start`.
-// Retorna ponteiro para o início e preenche *outLen com o tamanho do objeto.
 static const char* syncNextObject(const char* start, int* outLen) {
     const char* p = start;
     while (*p && *p != '{') p++;
@@ -505,14 +488,9 @@ static const char* syncNextObject(const char* start, int* outLen) {
     return nullptr;
 }
 
-// Parseia o JSON retornado pelo endpoint getDeviceSchedules.
-// Formato esperado: {"schedules":[{...},{...},...]}
-// Preenche outEntries (array pré-alocado de tamanho maxEntries).
-// Retorna quantidade de entradas parseadas.
 static int syncParseSchedulesJson(const char* json, int jsonLen, FirestoreScheduleEntry* outEntries, int maxEntries) {
     if (!json || jsonLen <= 0 || !outEntries || maxEntries <= 0) return 0;
 
-    // Localiza array "schedules":[...]
     const char* arrayKey = strstr(json, "\"schedules\":");
     if (!arrayKey) return 0;
     const char* bracket = strchr(arrayKey, '[');
@@ -529,29 +507,24 @@ static int syncParseSchedulesJson(const char* json, int jsonLen, FirestoreSchedu
         FirestoreScheduleEntry& e = outEntries[count];
         memset(&e, 0, sizeof(e));
 
-        // id
         if (!syncParseString(obj, objLen, "id", e.id, sizeof(e.id))) {
             p = obj + objLen;
             continue;
         }
 
-        // horaAcionamento "HH:MM"
         char hora[16] = {0};
         if (!syncParseString(obj, objLen, "horaAcionamento", hora, sizeof(hora))) {
-            // fallback: "hora"
             syncParseString(obj, objLen, "hora", hora, sizeof(hora));
         }
-        // parse HH:MM
         int h = 0, m = 0;
         if (sscanf(hora, "%d:%d", &h, &m) == 2 && h >= 0 && h <= 23 && m >= 0 && m <= 59) {
             e.hour = h;
             e.minute = m;
         } else {
             p = obj + objLen;
-            continue; // hora inválida: pula
+            continue;
         }
 
-        // tempoAcionamento
         int dur = 0;
         if (!syncParseInt(obj, "tempoAcionamento", &dur)) {
             syncParseInt(obj, "duracaoSegundos", &dur);
@@ -560,15 +533,10 @@ static int syncParseSchedulesJson(const char* json, int jsonLen, FirestoreSchedu
         if (dur > DURACAO_IRRIGACAO_MAXIMA) dur = DURACAO_IRRIGACAO_MAXIMA;
         e.durationSeconds = dur;
 
-        // ativo
         bool ativo = false;
         syncParseBool(obj, "ativo", &ativo);
         e.ativo = ativo;
-
-        // diasSemana
         e.diasMask = syncParseDiasMask(obj);
-
-        // createdAt (opcional)
         syncParseString(obj, objLen, "createdAt", e.createdAt, sizeof(e.createdAt));
 
         count++;
@@ -578,8 +546,6 @@ static int syncParseSchedulesJson(const char* json, int jsonLen, FirestoreSchedu
     return count;
 }
 
-// Executa a reconciliação: busca os agendamentos do Firestore via HTTP e aplica o diff na NVS.
-// Deve ser chamado a partir de uma task no Core 0 (nunca diretamente no loop principal).
 void MqttManager::syncSchedulesFromFirestore() {
     if (_scheduleSyncRunning) {
         fwLogLine("INFO", "SYNC", "Sync ja em andamento; ignorando disparo duplo");
@@ -625,15 +591,11 @@ void MqttManager::syncSchedulesFromFirestore() {
         return;
     }
 
-    // Parseia os agendamentos retornados pelo Firestore
     FirestoreScheduleEntry firestoreSchedules[MAX_FIRESTORE_SCHEDULES];
     int firestoreCount = syncParseSchedulesJson(body.c_str(), (int)body.length(), firestoreSchedules, MAX_FIRESTORE_SCHEDULES);
 
     fwLogf("INFO", "SYNC", "Firestore retornou %d agendamento(s)", firestoreCount);
 
-    // ---- PASSO 1: Remove da NVS agendamentos que NÃO existem mais no Firestore ----
-    // Coletamos os IDs a remover antes de entrar na seção crítica para manter o bloco curto.
-    // A NVS é escrita fora do critical (writeBytes é lenta), apenas o array em RAM é protegido.
     char idsToRemove[4][64] = {};
     int removeCount = 0;
 
@@ -660,8 +622,6 @@ void MqttManager::syncSchedulesFromFirestore() {
         atuador.removeSchedule(idsToRemove[k]);
     }
 
-    // ---- PASSO 2: Upsert de todos os agendamentos do Firestore na NVS ----
-    // upsertSchedule é idempotente: não altera lastTriggerAt, apenas atualiza campos.
     int upserted = 0;
     int rejected = 0;
     for (int j = 0; j < firestoreCount; j++) {
@@ -689,13 +649,10 @@ void MqttManager::syncSchedulesFromFirestore() {
     _scheduleSyncRunning = false;
 }
 
-// ==================== FIM SINCRONIZACAO DE AGENDAMENTOS ====================
-
 // ==================== HELPERS DE PARSE ====================
 
 static bool publishMessage(const char* topic, const char* payload, bool retain) {
     bool ok = client.publish(topic, payload, retain);
-    
     if (!ok) {
         Serial.println("[MQTT] falha ao publicar");
     }
@@ -741,11 +698,6 @@ static bool isLikelyJsonObject(const String& msg) {
     return !inString && braceDepth == 0 && bracketDepth == 0;
 }
 
-// Localiza a PRIMEIRA ocorrência de `key` como chave JSON válida.
-// Ao contrário da versão anterior (findUniqueKey), não rejeita payloads com
-// chaves duplicadas — comportamento alinhado com a especificação ECMA-404 e
-// com o que os parsers reais fazem (primeira ocorrência vence).
-// Retorna true e preenche *outKeyPos com o índice do caractere '"' inicial da chave.
 static bool findFirstKey(const String& msg, const char* key, int* outKeyPos) {
     String token = String("\"") + key + "\"";
     int searchFrom = 0;
@@ -755,8 +707,6 @@ static bool findFirstKey(const String& msg, const char* key, int* outKeyPos) {
         int pos = msg.indexOf(token, searchFrom);
         if (pos < 0) return false;
 
-        // Verificar que o caractere após a chave + aspas é ':' (ignora valores que
-        // usam o mesmo texto como string e não como chave).
         int afterToken = pos + (int)token.length();
         while (afterToken < len &&
                (msg[afterToken] == ' ' || msg[afterToken] == '\t' ||
@@ -778,7 +728,6 @@ static bool parseAction(const String& msg, String& outAction) {
     if (colonPos < 0) return false;
     int firstQuote = msg.indexOf('"', colonPos + 1);
     if (firstQuote < 0) return false;
-    // Lê até a próxima aspa não escapada por barra invertida
     outAction = "";
     bool esc = false;
     for (int i = firstQuote + 1; i < (int)msg.length(); i++) {
@@ -941,7 +890,6 @@ static bool parseStringByKey(const String& msg, const char* key, String& outValu
     int firstQuote = msg.indexOf('"', colonPos + 1);
     if (firstQuote < 0) return false;
 
-    // Lê até a próxima aspa não escapada por barra invertida
     outValue = "";
     bool esc = false;
     for (int i = firstQuote + 1; i < (int)msg.length(); i++) {
@@ -970,7 +918,6 @@ static bool parseBoolByKey(const String& msg, const char* key, bool* found) {
     String after = msg.substring(colonPos + 1);
     after.trim();
     after.toLowerCase();
-    // Aceita boolean JSON (`true`) ou string (`"true"`), comum em serializers.
     if (after.length() >= 2 && after.charAt(0) == '"') {
         int close = after.indexOf('"', 1);
         if (close > 1) {
@@ -982,7 +929,6 @@ static bool parseBoolByKey(const String& msg, const char* key, bool* found) {
     return after.startsWith("true") || after == "1";
 }
 
-// Extrai objeto JSON balanceado a partir do indice do primeiro '{' (ignora { } dentro de strings).
 static bool extractBalancedJsonObject(const String& msg, int openBrace, String& outObject) {
     if (openBrace < 0 || openBrace >= (int)msg.length() || msg[openBrace] != '{') {
         return false;
@@ -1020,7 +966,6 @@ static bool extractBalancedJsonObject(const String& msg, int openBrace, String& 
     return false;
 }
 
-// Primeira ocorrencia valida de "key" como chave JSON (nao exige unicidade no payload inteiro).
 static bool extractJsonObjectByKey(const String& msg, const char* key, String& outObject) {
     String token = String("\"") + key + "\"";
     int searchStart = 0;
@@ -1090,7 +1035,6 @@ static int weekdayFromName(const String& nameRaw) {
     name.trim();
     name.toLowerCase();
 
-    // Convenção: domingo=1, segunda=2, ... sábado=7.
     if (name == "0" || name == "1" || name == "sun" || name == "sunday" || name == "domingo") return 0;
     if (name == "2" || name == "mon" || name == "monday" || name == "segunda" || name == "segunda-feira") return 1;
     if (name == "3" || name == "tue" || name == "tuesday" || name == "terca" || name == "terça" || name == "terca-feira" || name == "terça-feira") return 2;
@@ -1154,7 +1098,6 @@ static int parseDurationFromSchedule(const String& scheduleJson) {
     return 0;
 }
 
-// Parseia um valor float para a chave JSON `key`. Retorna true se encontrado.
 static bool parseFloatKey(const String& msg, const char* key, float* outVal) {
     int keyPos = -1;
     if (!findFirstKey(msg, key, &keyPos)) return false;
@@ -1162,10 +1105,8 @@ static bool parseFloatKey(const String& msg, const char* key, float* outVal) {
     if (colonPos < 0) return false;
     int i = colonPos + 1;
     int len = msg.length();
-    // pular espaços e aspas
     while (i < len && (msg[i] == ' ' || msg[i] == '\t' || msg[i] == '"')) i++;
     int start = i;
-    // aceitar caracteres de número, ponto, sinal, e notação exponencial
     while (i < len) {
         char c = msg[i];
         if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E') {
@@ -1242,7 +1183,6 @@ static uint8_t parseDiasSemanaMask(const String& scheduleJson) {
         }
 
         int weekday = -1;
-        // Convenção do app/Firestore: domingo=1, segunda=2, ... sábado=7.
         if (value >= 1 && value <= 7) {
             weekday = value - 1;
         }
@@ -1295,7 +1235,6 @@ static bool handleScheduleEvent(const String& msg) {
         return true;
     }
 
-    // Alguns backends envolvem o documento: payload.schedule ou payload.data
     String scheduleIdProbe;
     if (!parseStringByKey(scheduleJson, "id", scheduleIdProbe)) {
         String nested;
@@ -1375,9 +1314,6 @@ static bool handleScheduleEvent(const String& msg) {
 
     bool ok = atuador.upsertSchedule(scheduleId.c_str(), ativo, diasMask, hour, minute, duration, createdAt.c_str());
 
-    // Feedback ao app: se a agenda foi rejeitada por falta de slot, publica no tópico de status
-    // para que o app possa avisar o usuário.
-    // Usa atuador.getMaxSchedules() para evitar literal hardcoded desatualizado.
     if (!ok && (action == "scheduleCreated")) {
         char errPayload[128];
         snprintf(errPayload, sizeof(errPayload),
@@ -1440,9 +1376,7 @@ static bool handleScheduleEvent(const String& msg) {
     return true;
 }
 
-// Publish sensor telemetry (delta-optimized). Keeps payload small and avoid reallocations.
 static void publishTelemetry(const SensorData& data) {
-    // Buffer aumentado para acomodar o campo deviceId (ex: "esp32_01" + overhead JSON)
     char payload[220];
     const char* waterLevel = data.nivelAgua ? "Cheio" : "Vazio";
     const char* pumpStatus = atuador.isLigado() ? "ON" : "OFF";
@@ -1462,7 +1396,7 @@ static void publishTelemetry(const SensorData& data) {
 }
 
 // ================== CALLBACK ==================
-// MQTT message callback: parses incoming commands and updates actuator/schedules accordingly.
+
 void callback(char* topic, byte* payload, unsigned int length) {
 
     String msg;
@@ -1529,15 +1463,12 @@ void callback(char* topic, byte* payload, unsigned int length) {
                 Serial.println(cooldown);
             }
 
-            // Persiste duracao/threshold/cooldown em uma unica escrita NVS.
-            // setModoAuto() ja persiste de forma independente e imediata.
             atuador.flushConfig();
 
             Serial.println("[CONFIG] setConfig aplicado");
             return;
         }
 
-        // Handler para calibracao de vazao via MQTT
         if (hasAction && action == "setFlowCalibration") {
             float scale = 0.0f;
             float offset = 0.0f;
@@ -1552,7 +1483,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
             extern FlowMeterManager flowMeter;
             flowMeter.setVolumeCalibration(scale, hasOffset ? offset : 0.0f);
 
-            // Acknowledge via telemetry topic
             String ack = String("{\"action\":\"setFlowCalibration\",\"scale\":") + String(scale, 6) + ",\"offsetMl\":" + String(hasOffset ? offset : 0.0f, 3) + "}";
             publishMessage(cachedTelemetryTopic, ack.c_str(), false);
             Serial.println("[MQTT] setFlowCalibration aplicado");
@@ -1586,8 +1516,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
         if (hasAction && hasIrrigateAction(action)) {
             int duration = parseDuration(msg);
             atuador.setDuracaoSegundos(duration);
-            // Persiste a nova duracao imediatamente — este setter e chamado
-            // isoladamente (sem batch de outros campos de config).
             atuador.flushConfig();
 
             if (duration > 0) {
@@ -1606,9 +1534,8 @@ void callback(char* topic, byte* payload, unsigned int length) {
 }
 
 // ================== CONEXAO ==================
-// Establish connection to MQTT broker with exponential backoff. Ensures client state is reset before connect.
+
 bool connectMQTT() {
-    // Se já estamos conectados, nada a fazer
     if (client.connected()) return true;
 
     bool alreadyRunning = false;
@@ -1619,7 +1546,6 @@ bool connectMQTT() {
     }
     taskEXIT_CRITICAL(&mqttConnectMux);
 
-    // Se já existe uma task de conexão em andamento, retornamos false
     if (alreadyRunning) {
         Serial.println("[MQTT] Conexao async ja em andamento");
         return false;
@@ -1627,7 +1553,6 @@ bool connectMQTT() {
 
     Serial.println("[MQTT] Iniciando task assíncrona de conexão MQTT...");
 
-    // Criar task no Core 0 para executar a conexão (TLS/handshake podem bloquear)
     BaseType_t result = xTaskCreatePinnedToCore(
         mqttConnectTask,
         "mqttConnect",
@@ -1635,7 +1560,7 @@ bool connectMQTT() {
         nullptr,
         1,
         nullptr,
-        0 // core 0
+        0
     );
 
     if (result != pdPASS) {
@@ -1649,8 +1574,6 @@ bool connectMQTT() {
     return false;
 }
 
-// Task que executa uma unica tentativa de conexao sem bloquear o loop principal.
-// O loop() ja controla o backoff exponencial entre novas tentativas.
 static void mqttConnectTask(void* pvParameters) {
     fwLogSection("MQTT", "Reconexao ao broker");
     fwLogf("INFO", "MQTT", "freeHeap=%lu", (unsigned long)ESP.getFreeHeap());
@@ -1658,19 +1581,8 @@ static void mqttConnectTask(void* pvParameters) {
 
     fwLogLine("INFO", "MQTT", "Tentativa unica de conexao com o broker");
 
-    // Setar flag para evitar que Core 1 chame client.loop() durante connect()
     mqttConnectingInProgress = true;
 
-    // NOTA: NÃO chamar esp_task_wdt_delete() aqui.
-    // mqttConnectTask nunca foi registrada no TWDT (só a loopTask foi via
-    // esp_task_wdt_add(NULL) no setup). Chamar wdt_delete numa task não registrada
-    // gera "delete_entry: task not found" e não tem efeito útil.
-    //
-    // O TWDT agora monitora APENAS a loopTask (main.ino). O handshake TLS desta
-    // task não interfere mais no watchdog. Veja idle_core_mask=0 em main.ino.
-
-    // NÃO usar mutex em client.connect() — é bloqueante (TLS handshake).
-    // A flag mqttConnectingInProgress evita concorrência com client.loop() no Core 1.
     bool connected = client.connect(
         clientId.c_str(),
         MQTT_USER,
@@ -1682,16 +1594,11 @@ static void mqttConnectTask(void* pvParameters) {
 
     if (connected) {
         fwLogLine("INFO", "MQTT", "MQTT conectado");
-        // NÃO executar subscribe/publish/sensores.read()/atuador aqui.
-        // Estas operações acessam objetos que vivem no Core 1 e não são
-        // thread-safe. Sinalizar via flag; o loop() do Core 1 fará tudo
-        // em segurança na próxima iteração.
         mqttJustConnected = true;
     } else {
         fwLogLine("WARN", "MQTT", "Falha ao conectar; nova tentativa apenas apos backoff exponencial");
     }
 
-    // Liberar o loop somente depois que todas as operações do connect terminaram.
     mqttConnectingInProgress = false;
 
     if (!client.connected()) {
@@ -1702,62 +1609,49 @@ static void mqttConnectTask(void* pvParameters) {
     connectTaskRunning = false;
     taskEXIT_CRITICAL(&mqttConnectMux);
 
-    // Pequeno delay cooperativo antes de destruir a task — dá tempo para o Core 1
-    // observar connectTaskRunning = false na próxima iteração do loop().
     vTaskDelay(pdMS_TO_TICKS(20));
 
-    // Finalizar task explicitamente (sem reregistrar no TWDT — task encerra aqui)
     vTaskDelete(nullptr);
 }
 
 // ================== INIT ==================
-// Initialize MQTT client, FreeRTOS firebase queue/task, set callback and prepare clientId.
-// eventMgr: referencia explicita ao IrrigationEventManager — elimina acoplamento via extern.
-// Call once from setup().
+
 void MqttManager::begin(IrrigationEventManager& eventMgr) {
     mqttManagerInstance = this;
     _eventMgr = &eventMgr;
     g_eventMgr = &eventMgr;
 
-    espClient.setInsecure(); // TLS sem validacao
+    espClient.setInsecure();
 
     clientId = "ESP32_" + WiFi.macAddress();
     refreshMqttTopicCache();
 
     client.setServer(MQTT_SERVER, MQTT_PORT);
-    // Schedule events include nested JSON and timestamps; default PubSubClient packet size is too small.
     client.setBufferSize(4096);
     client.setCallback(callback);
     client.setKeepAlive(10);
-    client.setSocketTimeout(15);  // CORREÇÃO: aumentado de 8s para 15s — handshake TLS
-                                  // com HiveMQ Cloud pode ultrapassar 8s em rede instável.
+    client.setSocketTimeout(15);
 
-    // Cria fila com capacidade para 4 eventos — suficiente para rajadas normais.
-    // Cada item e' copiado por valor, sem ponteiros pendentes.
     firebaseQueue = xQueueCreate(4, sizeof(FirebaseEventPayload));
     if (firebaseQueue == nullptr) {
         fwLogLine("ERROR", "FIREBASE", "Falha ao criar fila FreeRTOS");
         return;
     }
 
-    // Fila de sinal para sincronização de agendamentos (tamanho 1 — apenas gatilho).
     scheduleSyncQueue = xQueueCreate(1, sizeof(uint8_t));
     if (scheduleSyncQueue == nullptr) {
         fwLogLine("ERROR", "SYNC", "Falha ao criar fila de sync FreeRTOS");
         return;
     }
 
-    // Cria a task no Core 0 (protocolo/rede). Mantida separada do loopTask (Core 1)
-    // para que operações bloqueantes de TLS/HTTPClient não atrasem o loop principal.
-    // Stack de 20 KB acomoda HTTPClient + WiFiClientSecure sem risco de overflow.
     BaseType_t result = xTaskCreatePinnedToCore(
-        firebaseTask,       // funcao da task
-        "firebaseHTTP",    // nome para debug
-        20480,              // stack em bytes (20 KB)
-        nullptr,            // parametro
-        1,                  // prioridade
-        nullptr,            // handle (nao necessario)
-        0                   // core 0 — separado do loopTask
+        firebaseTask,
+        "firebaseHTTP",
+        20480,
+        nullptr,
+        1,
+        nullptr,
+        0
     );
 
     if (result != pdPASS) {
@@ -1766,16 +1660,14 @@ void MqttManager::begin(IrrigationEventManager& eventMgr) {
         fwLogLine("INFO", "FIREBASE", "Task HTTP iniciada no Core 0 (stack=20KB)");
     }
 
-    // Task de sincronização de agendamentos: aguarda sinal na fila e executa HTTP.
-    // Stack 20 KB: mesma base da firebaseTask (TLS + HTTPClient).
     BaseType_t syncResult = xTaskCreatePinnedToCore(
-        scheduleSyncTask,  // funcao da task
-        "scheduleSync",    // nome para debug
-        20480,             // stack em bytes (20 KB)
+        scheduleSyncTask,
+        "scheduleSync",
+        20480,
         nullptr,
         1,
         nullptr,
-        0  // core 0
+        0
     );
 
     if (syncResult != pdPASS) {
@@ -1786,6 +1678,7 @@ void MqttManager::begin(IrrigationEventManager& eventMgr) {
 }
 
 // ================== LOOP ==================
+
 void MqttManager::loop() {
 
     if (WiFi.status() != WL_CONNECTED) {
@@ -1821,9 +1714,6 @@ void MqttManager::loop() {
 
     mqttWasConnected = true;
 
-    // Pós-conexão: executado no Core 1 (loop principal) onde client e sensores são seguros.
-    // A mqttConnectTask (Core 0) apenas seta mqttJustConnected; toda lógica de
-    // subscribe/publish/reset-de-estado acontece aqui.
     if (mqttJustConnected) {
         mqttJustConnected = false;
 
@@ -1831,23 +1721,20 @@ void MqttManager::loop() {
         client.publish(cachedStatusTopic, "online", true);
         fwLogf("INFO", "MQTT", "Subscribed em %s", cachedCommandsTopic);
 
-        // Reset de estado delta — forçar publicação de telemetria completa na reconexão.
-        lastSolo   = -1;
-        lastTemp   = -1000;
+        lastSolo = -1;
+        lastTemp = -1000;
         lastUmidAr = -1000;
         SensorData postConnectData = sensores.read();
         lastNivelAgua = !postConnectData.nivelAgua;
-        lastBomba  = !atuador.isLigado();
+        lastBomba = !atuador.isLigado();
         pendingSensorStability = false;
-        sensorStabilitySince   = 0;
-        candidateSolo   = -1;
-        candidateTemp   = -1000;
+        sensorStabilitySince = 0;
+        candidateSolo = -1;
+        candidateTemp = -1000;
         candidateUmidAr = -1000;
-        mqttWasConnected      = true;
-        reconnectBackoffMs    = 5000UL;
+        mqttWasConnected = true;
+        reconnectBackoffMs = 5000UL;
 
-        // Disparar sincronização de agendamentos após reconexão.
-        // A scheduleSyncTask (Core 0) faz o HTTP e reconcilia a NVS sem bloquear o loop.
         if (scheduleSyncQueue != nullptr && !_scheduleSyncRunning) {
             uint8_t trigger = 1;
             _scheduleSyncPending = true;
@@ -1856,7 +1743,6 @@ void MqttManager::loop() {
         }
     }
 
-    // Pular client.loop() se uma conexão está em andamento (Core 0 em client.connect()).
     if (!mqttConnectingInProgress) {
         client.loop();
     }
@@ -1866,13 +1752,6 @@ void MqttManager::loop() {
     SensorData data = sensores.read();
     unsigned long now = millis();
 
-    // ===== DETECÇÃO DE CONDIÇÕES DE PARADA =====
-    // O mqtt_manager NÃO age diretamente sobre atuador nem irrigationEventManager.
-    // Apenas detecta a condição e sinaliza para o controlador central (main.ino)
-    // via requestStopIrrigation(). main.ino chama stopIrrigation() na próxima
-    // iteração do loop de controle (~2 s), garantindo ponto único de desligamento.
-    // Guarda _stopRequested: evita dezenas de logs repetidos enquanto main.ino
-    // aguarda CONTROL_INTERVAL_MS (2s) para consumir o sinal via consumeStopRequest().
     if (atuador.isLigado() && !_stopRequested) {
         if (atuador.getActiveUntil() > 0 && now >= atuador.getActiveUntil()) {
             fwLogLine("INFO", "MQTT", "Timeout detectado; sinalizando parada (COMPLETED)");
@@ -1891,12 +1770,10 @@ void MqttManager::loop() {
     bool sensorMudou = soloMudou || tempMudou || umidadeArMudou;
     bool publicarTelemetria = false;
 
-    // Mantem comportamento imediato para reservatorio/bomba.
     if (nivelAguaMudou || bombaMudou) {
         publicarTelemetria = true;
     }
 
-    // Exige estabilidade de 3s para solo/temperatura/umidade do ar.
     if (sensorMudou) {
         int atualTemp = (int)data.temperatura;
         int atualUmidAr = (int)data.umidadeAr;
@@ -1939,9 +1816,6 @@ void MqttManager::loop() {
     }
 
     // ===== EVENTOS DE IRRIGACAO =====
-    // publishIrrigationEvent (MQTT) e chamado normalmente — e rapido.
-    // sendIrrigationEventToFirebase apenas enfileira o payload; o HTTP
-    // ocorre na firebaseTask (Core 0) sem bloquear este loop.
     if (g_eventMgr && (mqttWasConnected || client.connected())) {
         IrrigationEvent event;
         while (g_eventMgr->getNextPendingEvent(&event)) {
@@ -1951,7 +1825,6 @@ void MqttManager::loop() {
             g_eventMgr->formatIso8601(event.startAt, startIso, sizeof(startIso));
             g_eventMgr->formatIso8601(event.endAt, endIso, sizeof(endIso));
 
-            // Publicar via MQTT (nao bloqueia). So remove da fila MQTT se sucesso.
             bool mqttPublished = publishIrrigationEvent(
                 event.eventId,
                 startIso,
@@ -1973,17 +1846,7 @@ void MqttManager::loop() {
                 fwLogf("WARN", "MQTT", "Evento pendente mantido para retry: %s", event.eventId);
             }
 
-            // Envio ao Firebase e' um canal independente do MQTT: deve ser
-            // tentado mesmo se o MQTT falhar (ex: broker fora do ar), pois
-            // ele e' o unico caminho que alimenta o historico do app Kotlin.
-            // ANTES: este envio so ocorria dentro do "if (mqttPublished)",
-            // o que travava o evento inteiro (Firebase incluso) sempre que
-            // o MQTT falhava — causa raiz de eventos que nunca chegavam
-            // ao Firestore mesmo com o evento corretamente gerado no firmware.
-            //
-            // isAlreadyEnqueuedForFirebase evita reenfileirar o mesmo evento
-            // a cada ciclo de loop() enquanto ele permanece na fila RAM
-            // aguardando retry do MQTT (ver bloco abaixo).
+            // ===== ENVIO PARA FIREBASE (CORRIGIDO) =====
             if (!isAlreadyEnqueuedForFirebase(event.eventId)) {
                 sendIrrigationEventToFirebase(
                     event.eventId,
@@ -2009,12 +1872,6 @@ void MqttManager::loop() {
             }
 
             if (!mqttPublished) {
-                // Mantem o evento na fila RAM para retry do MQTT no proximo
-                // ciclo (mesmo comportamento de antes para o canal MQTT).
-                // O Firebase ja foi acionado (ou ja estava marcado como
-                // enfileirado) e nao sera disparado de novo para este
-                // eventId nesta sessao — a confirmacao definitiva de entrega
-                // continua sendo o HTTP 200 processado por removeFromHistory().
                 break;
             }
 
@@ -2022,7 +1879,6 @@ void MqttManager::loop() {
         }
     }
 
-    // ===== HEARTBEAT =====
     if (now - lastHeartbeat >= 10000) {
         publishMessage(cachedStatusTopic, "online", true);
         lastHeartbeat = now;
@@ -2049,15 +1905,13 @@ bool MqttManager::publishIrrigationEvent(const char* eventId, const char* startA
         return false;
     }
 
-    // Construir tópico: irrigahome/{deviceId}/events/irrigation
     char topic[128];
     String deviceId = getDeviceIdFromMac();
     snprintf(topic, sizeof(topic), "irrigahome/%s/events/irrigation", deviceId.c_str());
 
-    // Construir payload JSON
     char payload[800];
     snprintf(payload, sizeof(payload),
-             "{\"event\":\"irrigation_completed\",\"deviceId\":\"%s\",\"historyCollection\":\"%s\",\"eventId\":\"%s\"," 
+             "{\"event\":\"irrigation_completed\",\"deviceId\":\"%s\",\"historyCollection\":\"%s\",\"eventId\":\"%s\","
              "\"startAt\":\"%s\",\"endAt\":\"%s\",\"durationSec\":%d,"
              "\"trigger\":\"%s\",\"stopReason\":\"%s\","
              "\"flowSensor\":{\"totalPulses\":%u,\"totalVolumeLiters\":%.3f,\"totalVolumeMl\":%.1f,\"avgFlowRateLpm\":%.3f,\"flowDetected\":%s,\"flowStatus\":\"%s\"},"
@@ -2076,12 +1930,10 @@ bool MqttManager::publishIrrigationEvent(const char* eventId, const char* startA
 }
 
 // ==================== SINALIZAÇÃO DE PARADA ====================
-// Registra uma requisição de parada sem agir diretamente sobre o atuador.
-// Idempotente: se já há um pedido pendente com motivo mais grave (NO_WATER
-// sobre COMPLETED), o motivo existente é preservado.
+
 void MqttManager::requestStopIrrigation(IrrigationStopReason reason) {
     if (!_stopRequested || reason > _stopReason) {
-        _stopReason    = reason;
+        _stopReason = reason;
         _stopRequested = true;
     }
 }
@@ -2090,11 +1942,9 @@ bool MqttManager::isStopRequested() const {
     return _stopRequested;
 }
 
-// Retorna o motivo e limpa o flag — deve ser chamado exatamente uma vez
-// pelo consumidor (main.ino) por iteração de controle.
 IrrigationStopReason MqttManager::consumeStopRequest() {
     IrrigationStopReason r = _stopReason;
     _stopRequested = false;
-    _stopReason    = STOP_REASON_COMPLETED;
+    _stopReason = STOP_REASON_COMPLETED;
     return r;
 }

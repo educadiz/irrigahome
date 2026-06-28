@@ -5,18 +5,15 @@
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
-#include "irrigation_event_manager.h"  // Para IrrigationStopReason e IrrigationEventManager
+#include "irrigation_event_manager.h"
+#include "firebase_payload_builder.h"  // ADICIONADO
 
 class MqttManager {
 public:
-    // Recebe referencia explicita ao IrrigationEventManager para eliminar o
-    // acoplamento implicito via `extern`. O compilador garante que a instancia
-    // correta e' usada mesmo que main.ino seja refatorado.
     void begin(IrrigationEventManager& eventMgr);
     void loop();
     bool isConnected();
 
-    // Publicar evento de irrigação completada (via MQTT)
     bool publishIrrigationEvent(const char* eventId, const char* startAtIso,
                                 const char* endAtIso, int durationSec,
                                 const char* triggerType, const char* stopReason,
@@ -27,15 +24,8 @@ public:
                                 float accountingVolumeMl = 0.0,
                                 float nominalFlowRateMlPerMin = 0.0);
 
-    // Sincroniza agendamentos da NVS com o Firestore logo após conectar.
-    // Chama o endpoint getDeviceSchedules, faz diff com a NVS e aplica: upsert + remoção.
-    // Executado na task Firebase (Core 0) para não bloquear o loop principal.
     void syncSchedulesFromFirestore();
 
-    // Enviar evento para Firebase via HTTP (executado na firebaseTask — não bloqueia).
-    // getStopReasonString() e' chamado aqui (antes do enfileiramento) e nao dentro
-    // da task, garantindo que nenhum acesso a IrrigationEventManager ocorra em outra
-    // thread apos o dado ter sido copiado por valor para FirebaseEventPayload.
     void sendIrrigationEventToFirebase(const char* eventId, const char* startAtIso,
                                        const char* endAtIso, int durationSec,
                                        const char* triggerType,
@@ -50,10 +40,6 @@ public:
                                        float accountingVolumeMl = 0.0,
                                        float nominalFlowRateMlPerMin = 0.0);
 
-    // Sinalização de parada para o controlador central (main.ino).
-    // O mqtt_manager DETECTA as condições mas nunca age diretamente sobre
-    // atuador ou irrigationEventManager — apenas sinaliza via estes métodos.
-    // main.ino consome o sinal na próxima iteração do loop de controle (2 s).
     void requestStopIrrigation(IrrigationStopReason reason);
     bool isStopRequested() const;
     IrrigationStopReason consumeStopRequest();
@@ -61,11 +47,7 @@ public:
 private:
     bool              _stopRequested = false;
     IrrigationStopReason _stopReason = STOP_REASON_COMPLETED;
-    // Flag: sincronização de agendamentos pendente (setada após reconexão MQTT).
     volatile bool     _scheduleSyncPending = false;
-    // Flag: sync em andamento na task Firebase (evita disparo duplo).
     volatile bool     _scheduleSyncRunning = false;
-    // Referencia ao gerenciador de eventos injetada em begin().
-    // Ponteiro (e nao referencia de membro) para permitir inicializacao tardia.
     IrrigationEventManager* _eventMgr = nullptr;
 };
