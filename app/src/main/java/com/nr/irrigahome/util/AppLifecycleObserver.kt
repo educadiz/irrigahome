@@ -17,6 +17,8 @@ class AppLifecycleObserver @Inject constructor(
         if (SessionManager.shouldLogout()) {
             logoutUseCase()
             SessionManager.resetSession()
+        } else {
+            SessionManager.onAppForegrounded()
         }
     }
 }

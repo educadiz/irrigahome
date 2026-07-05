@@ -88,10 +88,10 @@ enum class TriggerType(val displayName: String) {
 
     companion object {
         fun fromString(value: String): TriggerType {
-            return when (value.lowercase()) {
+            return when (value.trim().lowercase()) {
                 "manual" -> MANUAL
-                "automatic", "automatico" -> AUTOMATIC
-                "schedule", "agendado" -> SCHEDULE
+                "automatic", "automatico", "auto" -> AUTOMATIC
+                "schedule", "scheduled", "agendado" -> SCHEDULE
                 else -> UNKNOWN
             }
         }

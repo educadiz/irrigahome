@@ -1,6 +1,7 @@
 // Responsabilidade: implementar integracao MQTT com telemetria, comandos e agendamentos.
 // O que faz: conecta ao broker, publica status/telemetria por delta, processa comandos
 // (modo, irrigacao, configuracao) e aplica eventos de schedule recebidos.
+
 #include "mqtt_manager.h"
 #include "config.h"
 #include "sensor_manager.h"
@@ -151,7 +152,6 @@ struct FirebaseEventPayload {
     float nominalFlowRateMlPerMin;
     bool flowDetected;
     char flowStatus[16];
-    // Novo campo para armazenar o payload JSON completo
     char jsonPayload[1024];
 };
 
@@ -187,7 +187,7 @@ struct FirestoreScheduleEntry {
 
 static const int MAX_FIRESTORE_SCHEDULES = 16;
 
-// ==================== TASK FIREBASE (CORRIGIDA) ====================
+// ==================== TASK FIREBASE ====================
 
 static void firebaseTask(void* pvParameters) {
     FirebaseEventPayload payload;
@@ -201,7 +201,6 @@ static void firebaseTask(void* pvParameters) {
                 continue;
             }
 
-            // ===== CORREÇÃO: Usar o payload JSON completo =====
             if (payload.jsonPayload[0] != '\0') {
                 WiFiClientSecure httpsClient;
                 httpsClient.setInsecure();
@@ -239,7 +238,6 @@ static void firebaseTask(void* pvParameters) {
                 continue;
             }
 
-            // ===== FALLBACK: URL com parâmetros GET (compatibilidade) =====
             snprintf(url, sizeof(url),
                 "%s?macAddress=%s&historyCollection=events&ownerUid=%s&eventId=%s&startAt=%s&endAt=%s&durationSec=%d&trigger=%s&stopReason=%s&success=%s&soilHumidity=%d&airHumidity=%d&temperature=%.2f&waterLevel=%s&totalPulses=%u&totalVolumeLiters=%.3f&avgFlowRateLpm=%.3f&totalVolumeMl=%.1f&accountingVolumeMl=%.1f&nominalFlowRateMlPerMin=%.1f&flowDetected=%s&flowStatus=%s&createdAt=%s&updatedAt=%s",
                 FIREBASE_SAVE_EVENT_URL,
@@ -302,7 +300,7 @@ static void firebaseTask(void* pvParameters) {
     }
 }
 
-// ==================== ENVIO PARA FIREBASE (CORRIGIDO) ====================
+// ==================== ENVIO PARA FIREBASE ====================
 
 void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
                                                  const char* startAtIso,
@@ -322,6 +320,20 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
                                                  float totalVolumeMl,
                                                  float accountingVolumeMl,
                                                  float nominalFlowRateMlPerMin) {
+    auto parseTriggerType = [](const char* value) -> IrrigationTriggerType {
+        if (!value) {
+            return TRIGGER_UNKNOWN;
+        }
+        String trigger = String(value);
+        trigger.trim();
+        trigger.toLowerCase();
+
+        if (trigger == "manual") return TRIGGER_MANUAL;
+        if (trigger == "automatic" || trigger == "automatico" || trigger == "auto") return TRIGGER_AUTOMATIC;
+        if (trigger == "schedule" || trigger == "scheduled" || trigger == "agendado") return TRIGGER_SCHEDULE;
+        return TRIGGER_UNKNOWN;
+    };
+
     if (!eventId || !startAtIso || !triggerType) {
         Serial.println("[FIREBASE] parametros invalidos");
         return;
@@ -337,14 +349,13 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
         return;
     }
 
-    // ===== CONSTRUIR PAYLOAD COMPLETO COM O BUILDER =====
     IrrigationEvent event;
     event.used = true;
     strncpy(event.eventId, eventId, sizeof(event.eventId) - 1);
     event.startAt = (time_t)atol(startAtIso);
     event.endAt = (time_t)atol(endAtIso);
     event.durationSec = durationSec;
-    event.trigger = TRIGGER_UNKNOWN;
+    event.trigger = parseTriggerType(triggerType);
     event.stopReason = stopReason;
     event.totalPulses = totalPulses;
     event.totalVolumeLiters = totalVolumeLiters;
@@ -355,7 +366,6 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
     event.flowDetected = flowDetected;
     strncpy(event.flowStatus, flowStatus ? flowStatus : "", sizeof(event.flowStatus) - 1);
 
-    // ===== USAR O BUILDER PARA CRIAR O PAYLOAD JSON =====
     String payload = FirebasePayloadBuilder::buildFullPayload(
         event,
         soilHumidity,
@@ -364,7 +374,6 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
         waterLevel
     );
 
-    // ===== PREENCHER O PAYLOAD PARA A FILA =====
     FirebaseEventPayload firebasePayload = {};
     strncpy(firebasePayload.eventId, eventId, sizeof(firebasePayload.eventId) - 1);
     strncpy(firebasePayload.startAtIso, startAtIso, sizeof(firebasePayload.startAtIso) - 1);
@@ -389,7 +398,6 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
     strncpy(firebasePayload.waterLevel, waterLevel ? "Cheio" : "Vazio", sizeof(firebasePayload.waterLevel) - 1);
     firebasePayload.waterLevel[sizeof(firebasePayload.waterLevel) - 1] = '\0';
     
-    // ===== ARMAZENAR O JSON COMPLETO NA FILA =====
     strncpy(firebasePayload.jsonPayload, payload.c_str(), sizeof(firebasePayload.jsonPayload) - 1);
     firebasePayload.jsonPayload[sizeof(firebasePayload.jsonPayload) - 1] = '\0';
 
@@ -398,13 +406,82 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
     Serial.print(" | Payload size: ");
     Serial.println(payload.length());
 
-    // ===== ENFILEIRAR O PAYLOAD COMPLETO =====
     if (xQueueSend(firebaseQueue, &firebasePayload, 0) != pdTRUE) {
         fwLogLine("WARN", "FIREBASE", "Fila cheia; evento descartado");
     }
 }
 
-// ==================== SINCRONIZACAO DE AGENDAMENTOS ====================
+// ==================== UNIFICACAO DE PARSERS DE AGENDAMENTO (CORRIGIDO) ====================
+
+static int weekdayFromName(const String& nameRaw) {
+    String name = nameRaw;
+    name.trim();
+    name.toLowerCase();
+
+    if (name == "0" || name == "1" || name == "sun" || name == "sunday" || name == "domingo") return 0;
+    if (name == "2" || name == "mon" || name == "monday" || name == "segunda" || name == "segunda-feira") return 1;
+    if (name == "3" || name == "tue" || name == "tuesday" || name == "terca" || name == "terça" || name == "terca-feira" || name == "terça-feira") return 2;
+    if (name == "4" || name == "wed" || name == "wednesday" || name == "quarta" || name == "quarta-feira") return 3;
+    if (name == "5" || name == "thu" || name == "thursday" || name == "quinta" || name == "quinta-feira") return 4;
+    if (name == "6" || name == "fri" || name == "friday" || name == "sexta" || name == "sexta-feira") return 5;
+    if (name == "7" || name == "sat" || name == "saturday" || name == "sabado" || name == "sábado") return 6;
+
+    return -1;
+}
+
+// Único parser de diasSemana responsável agora por strings de texto E inteiros, 
+// prevenindo perda de máscara em sincronização HTTP e Push MQTT
+static uint8_t extractDiasSemanaMask(const char* json, int maxLen) {
+    if (!json || maxLen <= 0) return 0;
+    
+    const char* keyPos = strstr(json, "\"diasSemana\"");
+    if (!keyPos || (keyPos - json) > maxLen) return 0;
+
+    const char* openBracket = strchr(keyPos, '[');
+    if (!openBracket || (openBracket - json) > maxLen) return 0;
+
+    const char* closeBracket = strchr(openBracket, ']');
+    if (!closeBracket || (closeBracket - json) > maxLen) return 0;
+
+    uint8_t mask = 0;
+    const char* p = openBracket + 1;
+
+    while (p < closeBracket) {
+        while (p < closeBracket && (*p == ' ' || *p == '\t' || *p == ',')) {
+            p++;
+        }
+        if (p >= closeBracket) break;
+
+        if (*p == '"') {
+            const char* quoteEnd = strchr(p + 1, '"');
+            if (quoteEnd && quoteEnd <= closeBracket) {
+                String token;
+                token.reserve(quoteEnd - p);
+                for (const char* t = p + 1; t < quoteEnd; t++) {
+                    token += *t;
+                }
+                int w = weekdayFromName(token);
+                if (w >= 0) mask |= (1U << w);
+                p = quoteEnd + 1;
+                continue;
+            }
+        }
+
+        if (*p >= '0' && *p <= '9') {
+            int val = 0;
+            while (p < closeBracket && *p >= '0' && *p <= '9') {
+                val = (val * 10) + (*p - '0');
+                p++;
+            }
+            if (val >= 1 && val <= 7) {
+                mask |= (1U << (val - 1));
+            }
+            continue;
+        }
+        p++;
+    }
+    return mask;
+}
 
 static bool syncParseString(const char* json, int jsonLen, const char* key, char* outBuf, int outBufLen) {
     char token[72];
@@ -446,24 +523,6 @@ static bool syncParseInt(const char* json, const char* key, int* outVal) {
     if (end == pos) return false;
     *outVal = (int)val;
     return true;
-}
-
-static uint8_t syncParseDiasMask(const char* json) {
-    const char* keyPos = strstr(json, "\"diasSemana\":");
-    if (!keyPos) return 0;
-    const char* bracket = strchr(keyPos, '[');
-    if (!bracket) return 0;
-    uint8_t mask = 0;
-    const char* p = bracket + 1;
-    while (*p && *p != ']') {
-        if (*p >= '0' && *p <= '9') {
-            int val = (int)strtol(p, nullptr, 10);
-            if (val >= 1 && val <= 7) mask |= (1U << (val - 1));
-        }
-        while (*p && *p != ',' && *p != ']') p++;
-        if (*p == ',') p++;
-    }
-    return mask;
 }
 
 static const char* syncNextObject(const char* start, int* outLen) {
@@ -536,7 +595,10 @@ static int syncParseSchedulesJson(const char* json, int jsonLen, FirestoreSchedu
         bool ativo = false;
         syncParseBool(obj, "ativo", &ativo);
         e.ativo = ativo;
-        e.diasMask = syncParseDiasMask(obj);
+        
+        // ===== CORREÇÃO: Usando o parser unificado =====
+        e.diasMask = extractDiasSemanaMask(obj, objLen);
+        
         syncParseString(obj, objLen, "createdAt", e.createdAt, sizeof(e.createdAt));
 
         count++;
@@ -561,7 +623,7 @@ void MqttManager::syncSchedulesFromFirestore() {
     }
 
     char url[256];
-    snprintf(url, sizeof(url), "%s/getDeviceSchedules?deviceId=%s", FIREBASE_PROJECT_URL, cachedDeviceId);
+    snprintf(url, sizeof(url), "%s?deviceId=%s", FIREBASE_GET_DEVICE_SCHEDULES_URL, cachedDeviceId);
 
     fwLogf("INFO", "SYNC", "Buscando agendamentos: %s", url);
 
@@ -1030,22 +1092,6 @@ static bool extractJsonArrayByKey(const String& msg, const char* key, String& ou
     return false;
 }
 
-static int weekdayFromName(const String& nameRaw) {
-    String name = nameRaw;
-    name.trim();
-    name.toLowerCase();
-
-    if (name == "0" || name == "1" || name == "sun" || name == "sunday" || name == "domingo") return 0;
-    if (name == "2" || name == "mon" || name == "monday" || name == "segunda" || name == "segunda-feira") return 1;
-    if (name == "3" || name == "tue" || name == "tuesday" || name == "terca" || name == "terça" || name == "terca-feira" || name == "terça-feira") return 2;
-    if (name == "4" || name == "wed" || name == "wednesday" || name == "quarta" || name == "quarta-feira") return 3;
-    if (name == "5" || name == "thu" || name == "thursday" || name == "quinta" || name == "quinta-feira") return 4;
-    if (name == "6" || name == "fri" || name == "friday" || name == "sexta" || name == "sexta-feira") return 5;
-    if (name == "7" || name == "sat" || name == "saturday" || name == "sabado" || name == "sábado") return 6;
-
-    return -1;
-}
-
 static bool shouldHandleForThisDevice(const String& deviceIdRaw) {
     if (deviceIdRaw.length() == 0) {
         return true;
@@ -1136,63 +1182,6 @@ static bool parseHourMinute(const String& hhmm, int* outHour, int* outMinute) {
     *outHour = hour;
     *outMinute = minute;
     return true;
-}
-
-static uint8_t parseDiasSemanaMask(const String& scheduleJson) {
-    int keyPos = scheduleJson.indexOf("\"diasSemana\"");
-    if (keyPos < 0) return 0;
-
-    int openBracket = scheduleJson.indexOf('[', keyPos);
-    int closeBracket = scheduleJson.indexOf(']', openBracket);
-    if (openBracket < 0 || closeBracket < 0 || closeBracket <= openBracket) {
-        return 0;
-    }
-
-    uint8_t mask = 0;
-    int i = openBracket + 1;
-
-    while (i < closeBracket) {
-        while (i < closeBracket && (scheduleJson[i] == ' ' || scheduleJson[i] == '\t' || scheduleJson[i] == ',')) {
-            i++;
-        }
-
-        if (i < closeBracket && scheduleJson[i] == '"') {
-            int quoteEnd = scheduleJson.indexOf('"', i + 1);
-            if (quoteEnd > i && quoteEnd <= closeBracket) {
-                String token = scheduleJson.substring(i + 1, quoteEnd);
-                int weekday = weekdayFromName(token);
-                if (weekday >= 0) {
-                    mask |= (1U << weekday);
-                }
-                i = quoteEnd + 1;
-                continue;
-            }
-        }
-
-        bool hasDigit = false;
-        int value = 0;
-        while (i < closeBracket && scheduleJson[i] >= '0' && scheduleJson[i] <= '9') {
-            hasDigit = true;
-            value = (value * 10) + (scheduleJson[i] - '0');
-            i++;
-        }
-
-        if (!hasDigit) {
-            i++;
-            continue;
-        }
-
-        int weekday = -1;
-        if (value >= 1 && value <= 7) {
-            weekday = value - 1;
-        }
-
-        if (weekday >= 0) {
-            mask |= (1U << weekday);
-        }
-    }
-
-    return mask;
 }
 
 static String formatDiasSemanaMask(uint8_t diasMask) {
@@ -1308,7 +1297,9 @@ static bool handleScheduleEvent(const String& msg) {
         duration = atuador.getDuracaoSegundos();
     }
 
-    uint8_t diasMask = parseDiasSemanaMask(scheduleJson);
+    // ===== CORREÇÃO: Usando o parser unificado =====
+    uint8_t diasMask = extractDiasSemanaMask(scheduleJson.c_str(), scheduleJson.length());
+    
     String createdAt;
     parseStringByKey(scheduleJson, "createdAt", createdAt);
 
@@ -1846,7 +1837,6 @@ void MqttManager::loop() {
                 fwLogf("WARN", "MQTT", "Evento pendente mantido para retry: %s", event.eventId);
             }
 
-            // ===== ENVIO PARA FIREBASE (CORRIGIDO) =====
             if (!isAlreadyEnqueuedForFirebase(event.eventId)) {
                 sendIrrigationEventToFirebase(
                     event.eventId,

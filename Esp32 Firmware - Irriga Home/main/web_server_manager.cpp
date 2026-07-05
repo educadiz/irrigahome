@@ -1,17 +1,18 @@
 // Responsabilidade: servir pagina de manutencao via HTTP local e aplicar
 // offsets de calibracao de forma thread-safe.
 // O que faz: WebServer na porta 80, task FreeRTOS no Core 0, flag de config
-// pendente consumida pelo Core 1 em applyPendingConfig().
+// pendente consumida pelo Core 1 em applyPendingConfig() com barreira de memoria.
 
 #include "web_server_manager.h"
 #include "config.h"
+#include "firmware_logger.h" // Adicionado para padronizacao de logs
 #include <Arduino.h>
 #include <WebServer.h>
 #include <WiFi.h>
 
 // ── Servidor e instancia global da task ──────────────────────────────────────
 static WebServer          server(80);
-static WebServerManager*  _instance = nullptr;
+static WebServerManager* _instance = nullptr;
 // Simple authentication state (in-memory). Allows up to 3 attempts.
 static bool               _authValid = false;
 static int                _authAttemptsLeft = 3;
@@ -28,8 +29,6 @@ static String formatMacAddress() {
 }
 
 // ── HTML da pagina de manutencao (PROGMEM — nao consome RAM heap) ────────────
-// Pagina unica, CSS e JS inline, sem dependencias externas.
-// JS busca /api/data a cada 3 s e envia POST /api/config ao salvar.
 static const char MANUTENCAO_HTML[] PROGMEM = R"rawhtml(
 <!DOCTYPE html>
 <html lang="pt-BR">
@@ -186,7 +185,6 @@ footer #lv-lastupdate.stale{color:var(--err);opacity:1;font-weight:600}
   <footer>Irriga Home · E.Cadiz © 2026<br><span id="lv-lastupdate">Aguardando dados…</span></footer>
 </div>
 
-<!-- Auth -->
 <div class="overlay" id="auth-overlay">
   <div class="modal">
     <div class="modal-icon">🔒</div>
@@ -198,7 +196,6 @@ footer #lv-lastupdate.stale{color:var(--err);opacity:1;font-weight:600}
   </div>
 </div>
 
-<!-- Logout confirm -->
 <div class="overlay" id="logout-modal" hidden>
   <div class="modal">
     <h3>Encerrar sessão?</h3>
@@ -280,9 +277,6 @@ function atualizar(){
     $('lv-programmed').textContent=fmtDur(d.programmedDurationSec);
     $('lv-sched-count').textContent=String(d.scheduleCount??0);
 
-    // Marca o instante local em que esta leitura foi recebida.
-    // Se a tela travar ou a conexão cair, este valor para de avançar,
-    // permitindo identificar o exato momento da última atualização real.
     $('lv-lastupdate').textContent='Última atualização: '+fmtHora(new Date());
     $('lv-lastupdate').classList.remove('stale');
 
@@ -346,6 +340,7 @@ void WebServerManager::begin(SensorManager& sensors, ActuatorManager& actuator,
     _flow     = &flow;
     _instance = this;
 
+    // Registra as rotas HTTP (seguro fazer antes de abrir o servidor)
     server.on("/",          HTTP_GET,  []{ if (_instance) _instance->handleRoot();   });
     server.on("/api/data",  HTTP_GET,  []{ if (_instance) _instance->handleData();   });
     server.on("/api/auth",  HTTP_POST, []{ if (_instance) _instance->handleAuth();   });
@@ -354,13 +349,10 @@ void WebServerManager::begin(SensorManager& sensors, ActuatorManager& actuator,
     server.on("/api/config",HTTP_POST, []{ if (_instance) _instance->handleConfig(); });
     server.on("/api/schedules/reset", HTTP_POST, []{ if (_instance) _instance->handleResetSchedules(); });
 
-    server.begin();
-    Serial.print("[WEB] Servidor de manutencao iniciado em http://");
-    Serial.println(WiFi.localIP());
+    // Apenas informa que as rotas estao prontas. A porta 80 sera aberta na _task apos o WiFi conectar.
+    fwLogLine("INFO", "WEB", "Rotas HTTP configuradas. Aguardando Wi-Fi para abrir a porta 80...");
 
     // Task no Core 0 — junto com firebaseTask e mqttConnectTask.
-    // Stack 6 KB: WebServer (~2 KB) + snprintf/JSON (~1 KB) + margem TLS-free.
-    // webTask NAO e' registrada no TWDT — requests lentos nao causam panic.
     xTaskCreatePinnedToCore(_task, "webTask", 6144, this, 1, nullptr, 0);
 }
 
@@ -369,8 +361,22 @@ void WebServerManager::_task(void* pv) {
 }
 
 void WebServerManager::_run() {
+    bool serverStarted = false;
+
     for (;;) {
-        server.handleClient();
+        // Só abre a porta 80 e exibe o log na primeira vez que detectar o Wi-Fi conectado
+        if (!serverStarted && WiFi.status() == WL_CONNECTED) {
+            server.begin();
+            String ipStr = WiFi.localIP().toString();
+            fwLogf("INFO", "WEB", "Servidor de manutencao disponivel em http://%s", ipStr.c_str());
+            serverStarted = true;
+        }
+
+        // Só processa clientes se o servidor já estiver rodando
+        if (serverStarted) {
+            server.handleClient();
+        }
+        
         vTaskDelay(pdMS_TO_TICKS(10));  // cede CPU entre requisicoes
     }
 }
@@ -378,7 +384,6 @@ void WebServerManager::_run() {
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 void WebServerManager::handleRoot() {
-    // send_P le diretamente da flash — nao copia o HTML para a heap
     server.send_P(200, "text/html; charset=utf-8", MANUTENCAO_HTML);
 }
 
@@ -388,10 +393,7 @@ void WebServerManager::handleData() {
         return;
     }
 
-    // Leitura snapshot — segura pois SensorManager::read() e' idempotente
-    // e os campos de offset sao escritos apenas por applyPendingConfig() (Core 1).
     SensorData d = _sensors->read();
-
     String macAddress = formatMacAddress();
 
     char json[460];
@@ -434,14 +436,12 @@ void WebServerManager::handleData() {
 }
 
 void WebServerManager::handleAuth() {
-  // Espera campo 'password' no body
   if (!server.hasArg("password")) {
     server.send(400, "application/json", "{\"ok\":false,\"error\":\"parametros ausentes\"}");
     return;
   }
 
   String pass = server.arg("password");
-  // senha definida em secrets.h
   const char* DEFAULT_PASS = WEBSERVER_PASS;
 
   if (_authValid) {
@@ -452,11 +452,10 @@ void WebServerManager::handleAuth() {
   if (pass.equals(DEFAULT_PASS)) {
     _authValid = true;
     server.send(200, "application/json", "{\"ok\":true}");
-    Serial.println("[WEB] usuario autenticado com sucesso");
+    fwLogLine("INFO", "WEB", "Usuario autenticado com sucesso");
     return;
   }
 
-  // senha incorreta
   if (_authAttemptsLeft > 0) _authAttemptsLeft -= 1;
 
   char json[80];
@@ -473,7 +472,7 @@ void WebServerManager::handleAuth() {
 void WebServerManager::handleLogout() {
   resetAuthState();
   server.send(200, "application/json", "{\"ok\":true}");
-  Serial.println("[WEB] usuario saiu da manutencao");
+  fwLogLine("INFO", "WEB", "Usuario saiu da manutencao");
 }
 
 void WebServerManager::handleMeasure() {
@@ -487,7 +486,7 @@ void WebServerManager::handleMeasure() {
     return;
   }
 
-  int duration = 10; // default 10s
+  int duration = 10;
   if (server.hasArg("duration")) {
     duration = server.arg("duration").toInt();
     if (duration < 1) duration = 1;
@@ -507,27 +506,27 @@ void WebServerManager::handleMeasure() {
   server.send(200, "application/json", "{\"ok\":true}");
 }
 
-  void WebServerManager::handleResetSchedules() {
-    if (!_authValid) {
-      server.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
-      return;
-    }
-
-    if (!_actuator) {
-      server.send(503, "application/json", "{\"ok\":false,\"error\":\"not ready\"}");
-      return;
-    }
-
-    _actuator->clearSchedules();
-    server.send(200, "application/json", "{\"ok\":true}");
-  }
-
-void WebServerManager::handleConfig() {
+void WebServerManager::handleResetSchedules() {
   if (!_authValid) {
     server.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
     return;
   }
-    // Valida presenca dos campos obrigatorios
+
+  if (!_actuator) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"not ready\"}");
+    return;
+  }
+
+  _actuator->clearSchedules();
+  server.send(200, "application/json", "{\"ok\":true}");
+}
+
+void WebServerManager::handleConfig() {
+    if (!_authValid) {
+        server.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+        return;
+    }
+    
     if (!server.hasArg("offSolo")    || !server.hasArg("offTemp") ||
         !server.hasArg("offAr")      || !server.hasArg("flowScale") ||
         !server.hasArg("flowOffset")) {
@@ -541,7 +540,6 @@ void WebServerManager::handleConfig() {
     float flowScale = server.arg("flowScale").toFloat();
     float flowOff   = server.arg("flowOffset").toFloat();
 
-    // Validacao de limites antes de enfileirar
     if (offTemp   < -10.0f || offTemp   > 10.0f  ||
         offSolo   < -30.0f || offSolo   > 30.0f   ||
         offAr     < -20.0f || offAr     > 20.0f   ||
@@ -551,42 +549,46 @@ void WebServerManager::handleConfig() {
         return;
     }
 
-    // Copia para struct pendente (Core 0 escreve, Core 1 le)
-    // O flag volatile garante visibilidade entre nucleos sem mutex completo.
-    // Os campos numericos sao escritos antes do flag — sequencia de escrita segura
-    // para tipos simples em arquitetura 32-bit como o ESP32.
+    // ── CORREÇÃO: Seção Crítica (Spinlock) ──
+    portENTER_CRITICAL(&_pendingMux);
     _pending.offTemp    = offTemp;
     _pending.offSolo    = offSolo;
     _pending.offUmidAr  = offAr;
     _pending.flowScale  = flowScale;
     _pending.flowOffset = flowOff;
-    _pending.pending    = true;   // sinaliza por ultimo
+    _pending.pending    = true;   
+    portEXIT_CRITICAL(&_pendingMux);
 
     server.send(200, "application/json", "{\"ok\":true}");
 }
 
 // Chamado pelo loop() do main.ino no Core 1.
-// Aplica a configuracao pendente nos managers e persiste na NVS.
 void WebServerManager::applyPendingConfig() {
-    if (!_pending.pending) return;
-    _pending.pending = false;   // consome o flag antes de aplicar
+    // ── CORREÇÃO: Leitura e cópia segura dentro do Spinlock ──
+    PendingConfig localCopy;
+    
+    portENTER_CRITICAL(&_pendingMux);
+    if (!_pending.pending) {
+        portEXIT_CRITICAL(&_pendingMux);
+        return;
+    }
+    
+    localCopy = _pending;
+    _pending.pending = false;
+    portEXIT_CRITICAL(&_pendingMux);
 
     if (_sensors) {
-        _sensors->setOffsetTemperatura(_pending.offTemp);
-        _sensors->setOffsetUmidadeSolo(_pending.offSolo);
-        _sensors->setOffsetUmidadeAr(_pending.offUmidAr);
-        _sensors->flushOffsets();   // batch NVS
+        _sensors->setOffsetTemperatura(localCopy.offTemp);
+        _sensors->setOffsetUmidadeSolo(localCopy.offSolo);
+        _sensors->setOffsetUmidadeAr(localCopy.offUmidAr);
+        _sensors->flushOffsets();   
     }
 
     if (_flow) {
-        _flow->setVolumeCalibration(_pending.flowScale, _pending.flowOffset);
-        // setVolumeCalibration ja chama saveCalibration() internamente
+        _flow->setVolumeCalibration(localCopy.flowScale, localCopy.flowOffset);
     }
 
-    Serial.println("[WEB] calibracao aplicada via pagina de manutencao");
-    Serial.print  ("[WEB] offSolo=" );  Serial.print(_pending.offSolo,   1);
-    Serial.print  (" offTemp=");        Serial.print(_pending.offTemp,   1);
-    Serial.print  (" offAr=");          Serial.print(_pending.offUmidAr, 1);
-    Serial.print  (" flowScale=");      Serial.print(_pending.flowScale, 6);
-    Serial.print  (" flowOffsetMl=");   Serial.println(_pending.flowOffset, 3);
+    fwLogLine("INFO", "WEB", "Calibracao aplicada via pagina de manutencao");
+    fwLogf("INFO", "WEB", "offSolo=%.1f | offTemp=%.1f | offAr=%.1f | flowScale=%.6f | flowOffsetMl=%.3f",
+           localCopy.offSolo, localCopy.offTemp, localCopy.offUmidAr, localCopy.flowScale, localCopy.flowOffset);
 }

@@ -62,6 +62,31 @@ function toFirestoreTimestamp(value) {
   return null;
 }
 
+function normalizeTrigger(value) {
+  if (typeof value !== "string") {
+    return "unknown";
+  }
+
+  const normalized = value.trim().toLowerCase();
+  if (!normalized) {
+    return "unknown";
+  }
+
+  if (["manual"].includes(normalized)) {
+    return "manual";
+  }
+
+  if (["automatic", "automatico", "auto"].includes(normalized)) {
+    return "automatic";
+  }
+
+  if (["schedule", "scheduled", "agendado"].includes(normalized)) {
+    return "schedule";
+  }
+
+  return "unknown";
+}
+
 async function resolveDeviceOwnerUid(deviceId) {
   const normalizedDeviceId = typeof deviceId === "string" ? deviceId.trim() : "";
 
@@ -254,7 +279,7 @@ function normalizeIrrigationHistory(data, id) {
     startAt: toIsoOrNull(data.startAt),
     endAt: toIsoOrNull(data.endAt),
     durationSec: data.durationSec ?? null,
-    trigger: data.trigger ?? null,
+    trigger: normalizeTrigger(data.trigger),
     // Motivo de encerramento: "completed" | "manual" | "no_water"
     stopReason: data.stopReason ?? "completed",
     // Derivado: false quando a irrigação foi interrompida antes do tempo (ex: reservatório vazio)
@@ -645,7 +670,7 @@ exports.saveIrrigationEvent = onRequest(
         startAt,
         endAt,
         durationSec: parseInt(data.durationSec) || 0,
-        trigger: data.trigger || "unknown",
+        trigger: normalizeTrigger(data.trigger),
         // Motivo de encerramento enviado pelo firmware: "completed" | "manual" | "no_water"
         stopReason: data.stopReason || "completed",
         // Booleano explícito para facilitar queries (ex: where("success", "==", false))
@@ -748,7 +773,7 @@ exports.onMqttIrrigationEvent = onRequest(
         startAt,
         endAt,
         durationSec: payload.durationSec || 0,
-        trigger: payload.trigger || "unknown",
+        trigger: normalizeTrigger(payload.trigger),
         // Motivo de encerramento vindo do payload MQTT do firmware
         stopReason: payload.stopReason || "completed",
         // No payload MQTT o campo já chega como booleano nativo

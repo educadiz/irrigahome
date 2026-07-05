@@ -1,5 +1,5 @@
 // firebase_payload_builder.h
-// CORRIGIDO - Envia trigger como STRING, valida timestamps
+// CORRIGIDO - Envia trigger como STRING, valida timestamps, usa getDeviceIdFromMac global
 
 #pragma once
 #include <Arduino.h>
@@ -11,6 +11,7 @@
 class FirebasePayloadBuilder {
 public:
     static String buildIrrigationEventPayload(const IrrigationEvent& event) {
+        // Utiliza getDeviceIdFromMac() definido globalmente em config.h
         String deviceId = getDeviceIdFromMac();
         String ownerUid = getOwnerUid();
         
@@ -77,6 +78,7 @@ public:
                                    int airHumidity, 
                                    float temperature, 
                                    bool waterLevel) {
+        // Utiliza getDeviceIdFromMac() definido globalmente em config.h
         String deviceId = getDeviceIdFromMac();
         String ownerUid = getOwnerUid();
         
@@ -139,13 +141,8 @@ public:
     }
     
 private:
-    static String getDeviceIdFromMac() {
-        String deviceId = WiFi.macAddress();
-        deviceId.replace(":", "");
-        deviceId.replace("-", "");
-        deviceId.toLowerCase();
-        return deviceId;
-    }
+    // A função privada getDeviceIdFromMac() foi removida daqui.
+    // O código usará a versão global presente em config.h.
     
     // ===== CORREÇÃO: Converter trigger para STRING =====
     static String getTriggerString(IrrigationTriggerType trigger) {
@@ -153,7 +150,7 @@ private:
             case TRIGGER_MANUAL: return "manual";
             case TRIGGER_AUTOMATIC: return "automatic";
             case TRIGGER_SCHEDULE: return "schedule";
-            default: return "manual";  // Fallback para manual
+            default: return "unknown";
         }
     }
     

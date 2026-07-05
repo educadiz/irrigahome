@@ -116,6 +116,7 @@ void IrrigationEventManager::begin() {
     Serial.print("💧 IrrigationEventManager iniciado. Estado ativo: ");
     Serial.println(activeState.isActive ? "SIM" : "NÃO");
 }
+
 void IrrigationEventManager::onIrrigationStart(IrrigationTriggerType trigger) {
     if (activeState.isActive) {
         fwLogLine("WARN", "IRR", "onIrrigationStart chamado mas a irrigacao ja estava ativa");
@@ -169,14 +170,15 @@ void IrrigationEventManager::onIrrigationEnd(IrrigationStopReason reason) {
 
 #ifdef FLOW_SENSOR_PIN
     extern FlowMeterManager flowMeter;
-    fwLogLine("INFO", "FLOW", "Parando medicao de vazao; volume final calculado por tempo");
+    fwLogLine("INFO", "FLOW", "Parando medicao de vazao; processando dados reais");
     flowMeter.stopMeasurement();
 
     event.totalPulses = flowMeter.getTotalPulses();
-    float measuredMl = ((float)event.durationSec) * (72.0f / 6.0f);
-    if (measuredMl < 0.0f) measuredMl = 0.0f;
-    event.totalVolumeMl = measuredMl;
-    event.totalVolumeLiters = event.totalVolumeMl / 1000.0f;
+    
+    // ── CORREÇÃO: Utilizando os dados reais processados com calibração pelo sensor ──
+    event.totalVolumeLiters = flowMeter.getTotalVolumeLiters();
+    event.totalVolumeMl = event.totalVolumeLiters * 1000.0f;
+    
     if (event.durationSec > 0) {
         event.avgFlowRateLpm = event.totalVolumeLiters / ((float)event.durationSec / 60.0f);
     } else {
@@ -192,7 +194,9 @@ void IrrigationEventManager::onIrrigationEnd(IrrigationStopReason reason) {
 
     event.nominalFlowRateMlPerMin = PUMP_NOMINAL_FLOW_ML_PER_MIN;
     event.accountingVolumeMl = event.totalVolumeMl;
-    fwLogf("INFO", "IRR", "Dados por tempo | volume=%.3fL | volume_mL=%.1f | taxa=%.3fL/min | status=%s", event.totalVolumeLiters, event.totalVolumeMl, event.avgFlowRateLpm, event.flowStatus);
+    
+    fwLogf("INFO", "IRR", "Dados reais calculados | volume=%.3fL | volume_mL=%.1f | taxa=%.3fL/min | status=%s", 
+           event.totalVolumeLiters, event.totalVolumeMl, event.avgFlowRateLpm, event.flowStatus);
 #else
     event.totalPulses = 0;
     event.totalVolumeLiters = 0.0;
@@ -240,6 +244,7 @@ void IrrigationEventManager::update() {
         }
     }
 }
+
 bool IrrigationEventManager::isIrrigationActive() {
     return activeState.isActive;
 }
@@ -333,6 +338,7 @@ bool IrrigationEventManager::getHistoryEvent(int index, IrrigationHistoryEntry* 
     *outEvent = historyBuffer[index];
     return true;
 }
+
 bool IrrigationEventManager::formatIso8601(time_t timestamp, char* outBuffer, int bufferSize) {
     if (!outBuffer || bufferSize < 27) return false;
 
@@ -495,6 +501,7 @@ static bool parseHistoryLine(const String& line, IrrigationHistoryEntry* entry) 
 
     return true;
 }
+
 bool IrrigationEventManager::loadHistory() {
     if (!LittleFS.exists(HISTORY_FILE)) return false;
 
@@ -628,6 +635,7 @@ void IrrigationEventManager::removeFromHistory(const char* eventId) {
     Serial.print("[IRRG] Evento removido do JSONL apos confirmacao Firebase: ");
     Serial.println(eventId);
 }
+
 bool IrrigationEventManager::loadState() {
     if (!LittleFS.exists(STATE_FILE)) return false;
 

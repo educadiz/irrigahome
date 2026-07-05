@@ -378,7 +378,7 @@ class IrrigationHistoryRepository @javax.inject.Inject constructor(
             val startAt = parseFirestoreDate(data["startAt"])
             val endAt = parseFirestoreDate(data["endAt"])
             val durationSec = (data["durationSec"] as? Number)?.toLong() ?: 0L
-            val trigger = data["trigger"] as? String ?: "manual"
+            val trigger = data["trigger"] as? String ?: "unknown"
             val temperature = (data["temperature"] as? Number)?.toInt()
             val soilHumidity = (data["soilHumidity"] as? Number)?.toInt()
             val airHumidity = (data["airHumidity"] as? Number)?.toInt()

@@ -6,6 +6,8 @@
 #include "sensor_manager.h"
 #include "actuator_manager.h"
 #include "flow_meter_manager.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 class WebServerManager {
 public:
@@ -31,14 +33,16 @@ private:
     void handleConfig();
     void handleResetSchedules();
 
-    SensorManager*    _sensors  = nullptr;
-    ActuatorManager*  _actuator = nullptr;
+    SensorManager* _sensors  = nullptr;
+    ActuatorManager* _actuator = nullptr;
     FlowMeterManager* _flow     = nullptr;
 
-    // Config pendente — escrita pela webTask (Core 0), lida por applyPendingConfig() (Core 1).
-    // Mesmo padrao de _stopRequested / consumeStopRequest() do MqttManager.
+    // Mutex de hardware (Spinlock) para garantir barreira de memoria entre Core 0 e Core 1
+    portMUX_TYPE _pendingMux = portMUX_INITIALIZER_UNLOCKED;
+
+    // Estrutura sem volatile, pois o Spinlock ja garante a visibilidade correta
     struct PendingConfig {
-        volatile bool pending = false;
+        bool  pending    = false;
         float offTemp    = 0.0f;
         float offSolo    = 0.0f;
         float offUmidAr  = 0.0f;
