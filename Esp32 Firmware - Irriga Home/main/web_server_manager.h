@@ -6,6 +6,7 @@
 #include "sensor_manager.h"
 #include "actuator_manager.h"
 #include "flow_meter_manager.h"
+#include "irrigation_event_manager.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -14,7 +15,8 @@ public:
     // Injeta referencias aos managers e inicia a task FreeRTOS no Core 0.
     // Deve ser chamado em setup() apos wifi.connect().
     void begin(SensorManager& sensors, ActuatorManager& actuator,
-               FlowMeterManager& flow);
+               FlowMeterManager& flow,
+               IrrigationEventManager& eventManager);
 
     // Aplica configuracoes pendentes recebidas via POST /api/config.
     // Deve ser chamado no loop() do main.ino — executa no Core 1, onde vivem
@@ -36,6 +38,7 @@ private:
     SensorManager* _sensors  = nullptr;
     ActuatorManager* _actuator = nullptr;
     FlowMeterManager* _flow     = nullptr;
+    IrrigationEventManager* _eventManager = nullptr;
 
     // Mutex de hardware (Spinlock) para garantir barreira de memoria entre Core 0 e Core 1
     portMUX_TYPE _pendingMux = portMUX_INITIALIZER_UNLOCKED;

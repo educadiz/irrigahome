@@ -334,10 +334,12 @@ setInterval(atualizar,3000);
 // ── Implementacao ─────────────────────────────────────────────────────────────
 
 void WebServerManager::begin(SensorManager& sensors, ActuatorManager& actuator,
-                              FlowMeterManager& flow) {
+                FlowMeterManager& flow,
+                IrrigationEventManager& eventManager) {
     _sensors  = &sensors;
     _actuator = &actuator;
     _flow     = &flow;
+  _eventManager = &eventManager;
     _instance = this;
 
     // Registra as rotas HTTP (seguro fazer antes de abrir o servidor)
@@ -500,6 +502,9 @@ void WebServerManager::handleMeasure() {
 
   _actuator->setCurrentTrigger(TRIGGER_MANUAL);
   _actuator->ligar();
+  if (_eventManager) {
+    _eventManager->onIrrigationStart(TRIGGER_MANUAL);
+  }
   unsigned long now = millis();
   _actuator->setActiveUntil(now + ((unsigned long)duration * 1000UL));
 

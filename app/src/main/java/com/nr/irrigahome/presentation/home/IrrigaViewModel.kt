@@ -411,11 +411,12 @@ class IrrigaViewModel @Inject constructor(
     private fun executeManualIrrigation() {
         startWateringCycle(
             durationSeconds = getSelectedWateringDurationSeconds(),
-            cooldownSeconds = getSelectedCooldownSeconds()
+            cooldownSeconds = getSelectedCooldownSeconds(),
+            triggerType = "manual"
         )
     }
 
-    private fun startWateringCycle(durationSeconds: Int, cooldownSeconds: Int) {
+    private fun startWateringCycle(durationSeconds: Int, cooldownSeconds: Int, triggerType: String) {
         wateringJob?.cancel()
         cooldownJob?.cancel()
 
@@ -428,7 +429,7 @@ class IrrigaViewModel @Inject constructor(
         wateringJob = viewModelScope.launch(Dispatchers.Main.immediate) {
             _isWatering.value = true
             _wateringRemainingSeconds.intValue = safeDuration
-            mqttManager.publishIrrigationCommand(safeDuration)
+            mqttManager.publishIrrigationCommand(safeDuration, triggerType)
 
             try {
                 while (_wateringRemainingSeconds.intValue > 0) {
@@ -488,7 +489,8 @@ class IrrigaViewModel @Inject constructor(
 
         startWateringCycle(
             durationSeconds = _automaticWaterDurationSeconds.intValue,
-            cooldownSeconds = _automaticCooldownSeconds.intValue
+            cooldownSeconds = _automaticCooldownSeconds.intValue,
+            triggerType = "automatic"
         )
     }
 

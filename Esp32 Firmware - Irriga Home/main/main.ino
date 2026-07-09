@@ -118,7 +118,7 @@ void setup() {
     fwLogLine("INFO", "SETUP", "Cliente MQTT inicializado");
 
     fwLogSection("SETUP", "Servidor web de manutencao");
-    webServer.begin(sensores, atuador, flowMeter);
+    webServer.begin(sensores, atuador, flowMeter, irrigationEventManager);
     fwLogLine("INFO", "SETUP", "Servidor web inicializado");
     
     fwLogSection("SETUP", "Display");

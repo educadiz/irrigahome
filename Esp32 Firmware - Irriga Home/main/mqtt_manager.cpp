@@ -44,10 +44,12 @@ static int candidateUmidAr = -1000;
 
 static unsigned long lastReconnectAttempt = 0;
 static unsigned long lastHeartbeat = 0;
+static unsigned long lastScheduleSyncKick = 0;
 static unsigned long reconnectBackoffMs = 5000UL;
 static bool mqttWasConnected = false;
 static MqttManager* mqttManagerInstance = nullptr;
 static IrrigationEventManager* g_eventMgr = nullptr;
+static const unsigned long SCHEDULE_SYNC_INTERVAL_MS = 60000UL;
 
 // Controle de eventos ja enfileirados para o Firebase nesta sessao (RAM).
 static const int MAX_FIREBASE_ENQUEUED_IDS = 16;
@@ -159,6 +161,20 @@ static QueueHandle_t firebaseQueue = nullptr;
 
 // ==================== SINCRONIZACAO DE AGENDAMENTOS ====================
 static QueueHandle_t scheduleSyncQueue = nullptr;
+
+static void queueScheduleSync(const char* reason) {
+    if (scheduleSyncQueue == nullptr) {
+        return;
+    }
+
+    uint8_t trigger = 1;
+    xQueueOverwrite(scheduleSyncQueue, &trigger);
+    lastScheduleSyncKick = millis();
+
+    if (reason && reason[0] != '\0') {
+        fwLogf("INFO", "SYNC", "Sincronizacao de agendamentos enfileirada: %s", reason);
+    }
+}
 
 static void scheduleSyncTask(void* pvParameters) {
     for (;;) {
@@ -806,6 +822,16 @@ static bool hasIrrigateAction(const String& action) { return action == "irrigate
 static bool hasSetConfigAction(const String& action) { return action == "setConfig"; }
 static bool hasSetModeAction(const String& action) { return action == "setMode"; }
 
+static IrrigationTriggerType parseCommandTrigger(const String& rawTrigger) {
+    String trigger = rawTrigger;
+    trigger.trim();
+    trigger.toLowerCase();
+
+    if (trigger == "automatic" || trigger == "automatico" || trigger == "auto") return TRIGGER_AUTOMATIC;
+    if (trigger == "schedule" || trigger == "scheduled" || trigger == "agendado") return TRIGGER_SCHEDULE;
+    return TRIGGER_MANUAL;
+}
+
 static int parseDuration(const String& msg) {
     int keyPos = -1;
     if (!findFirstKey(msg, "duration", &keyPos)) return 0;
@@ -1364,6 +1390,8 @@ static bool handleScheduleEvent(const String& msg) {
     Serial.print(" saved=");
     Serial.println(ok ? "true" : "false");
 
+    queueScheduleSync("reconcile after schedule event");
+
     return true;
 }
 
@@ -1506,13 +1534,19 @@ void callback(char* topic, byte* payload, unsigned int length) {
 
         if (hasAction && hasIrrigateAction(action)) {
             int duration = parseDuration(msg);
+            String triggerRaw;
+            IrrigationTriggerType triggerType = TRIGGER_MANUAL;
+            if (parseStringByKey(msg, "trigger", triggerRaw)) {
+                triggerType = parseCommandTrigger(triggerRaw);
+            }
+
             atuador.setDuracaoSegundos(duration);
             atuador.flushConfig();
 
             if (duration > 0) {
-                atuador.setCurrentTrigger(TRIGGER_MANUAL);
+                atuador.setCurrentTrigger(triggerType);
                 atuador.ligar();
-                if (g_eventMgr) g_eventMgr->onIrrigationStart(TRIGGER_MANUAL);
+                if (g_eventMgr) g_eventMgr->onIrrigationStart(triggerType);
                 atuador.setActiveUntil(millis() + ((unsigned long)duration * 1000UL));
             } else {
                 if (mqttManagerInstance) {
@@ -1727,10 +1761,8 @@ void MqttManager::loop() {
         reconnectBackoffMs = 5000UL;
 
         if (scheduleSyncQueue != nullptr && !_scheduleSyncRunning) {
-            uint8_t trigger = 1;
             _scheduleSyncPending = true;
-            xQueueOverwrite(scheduleSyncQueue, &trigger);
-            fwLogLine("INFO", "SYNC", "Sincronizacao de agendamentos disparada apos reconexao MQTT");
+            queueScheduleSync("post MQTT reconnect");
         }
     }
 
@@ -1742,6 +1774,11 @@ void MqttManager::loop() {
 
     SensorData data = sensores.read();
     unsigned long now = millis();
+
+    if (scheduleSyncQueue != nullptr && !_scheduleSyncRunning && (now - lastScheduleSyncKick) >= SCHEDULE_SYNC_INTERVAL_MS) {
+        _scheduleSyncPending = true;
+        queueScheduleSync("periodic reconcile");
+    }
 
     if (atuador.isLigado() && !_stopRequested) {
         if (atuador.getActiveUntil() > 0 && now >= atuador.getActiveUntil()) {

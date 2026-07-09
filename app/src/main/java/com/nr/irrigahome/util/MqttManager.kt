@@ -157,24 +157,34 @@ class MqttManager @Inject constructor() {
     }
 
     fun publishBomba(ligar: Boolean) {
-        sendIrrigationCommand(if (ligar) 10 else 0)
+        sendIrrigationCommand(if (ligar) 10 else 0, trigger = "manual")
     }
 
     fun publishIrrigationCommand(durationSeconds: Int) {
-        sendIrrigationCommand(durationSeconds)
+        sendIrrigationCommand(durationSeconds, trigger = "manual")
+    }
+
+    fun publishIrrigationCommand(durationSeconds: Int, trigger: String) {
+        sendIrrigationCommand(durationSeconds, trigger)
     }
 
     fun publishSetConfig(mode: String, threshold: Int, durationSeconds: Int, cooldownSeconds: Int) {
         sendAutoConfig(mode = mode, threshold = threshold, duration = durationSeconds, cooldown = cooldownSeconds)
     }
 
-    fun sendIrrigationCommand(duration: Int) {
+    fun sendIrrigationCommand(duration: Int, trigger: String = "manual") {
         try {
             val safeDuration = duration.coerceAtLeast(0)
+            val normalizedTrigger = when (trigger.trim().lowercase()) {
+                "automatic", "automatico", "auto" -> "automatic"
+                "schedule", "scheduled", "agendado" -> "schedule"
+                else -> "manual"
+            }
             val payload = JSONObject()
                 .put("action", "irrigate")
                 .put("deviceId", activeDeviceId ?: "")
                 .put("macAddress", activeDeviceId ?: "")
+                .put("trigger", normalizedTrigger)
                 .put("duration", safeDuration)
 
             publishCommandPayload(payload)
