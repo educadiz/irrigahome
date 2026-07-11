@@ -20,13 +20,19 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -45,6 +51,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -55,6 +63,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import com.nr.irrigahome.ui.theme.AppCardTitleColor
 import com.nr.irrigahome.ui.theme.AppCardContainerColor
+import com.nr.irrigahome.ui.theme.AppCardBorderColor
 import com.nr.irrigahome.ui.theme.AppPrimaryGreen
 import com.nr.irrigahome.ui.theme.AppScreenBackgroundColor
 import com.nr.irrigahome.ui.theme.IrrigaHomeTheme
@@ -95,6 +104,13 @@ private fun IrrigaHomeApp(onExitApp: () -> Unit) {
     val showSplash = rememberSaveable { mutableStateOf(true) }
     val lifecycleOwner = LocalLifecycleOwner.current
 
+    val performFullLogout = {
+        irrigationViewModel.resetSessionState()
+        authViewModel.logout()
+        SessionManager.resetSession()
+        logoutFeedback.value = true
+    }
+
     LaunchedEffect(irrigationViewModel.deviceValidationState.value) {
         when (irrigationViewModel.deviceValidationState.value) {
             DeviceValidationState.Linked -> authViewModel.grantSessionAccess()
@@ -106,6 +122,9 @@ private fun IrrigaHomeApp(onExitApp: () -> Unit) {
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (!showSplash.value && (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_RESUME)) {
+                if (SessionManager.consumeAutoLogoutPending()) {
+                    performFullLogout()
+                }
                 authViewModel.refreshSessionState()
             }
         }
@@ -121,11 +140,17 @@ private fun IrrigaHomeApp(onExitApp: () -> Unit) {
         })
         uiState.isSessionActive == true -> HomePagerContent(deviceId = deviceId, onLogout = {
             // logout efetivo: limpa a sessão e deixa a UI decidir a próxima tela pelo estado
-            irrigationViewModel.resetSessionState()
-            authViewModel.logout()
-            SessionManager.resetSession()
-            logoutFeedback.value = true
+            performFullLogout()
         })
+        uiState.isSessionActive == false && irrigationViewModel.deviceValidationState.value == DeviceValidationState.Blocked -> DeviceBindingScreen(
+            isLoading = irrigationViewModel.isBindingDevice.value,
+            errorMessage = irrigationViewModel.deviceBindingError.value,
+            onBind = { code -> irrigationViewModel.bindDeviceToCurrentUser(code) },
+            onClearError = { irrigationViewModel.clearDeviceBindingError() },
+            onLogout = {
+                performFullLogout()
+            }
+        )
         else -> LoginScreen(
             onLoginSuccess = { irrigationViewModel.refreshLinkedDeviceState() },
             onExitApp = onExitApp,
@@ -134,6 +159,100 @@ private fun IrrigaHomeApp(onExitApp: () -> Unit) {
             showLogoutFeedback = logoutFeedback.value,
             onConsumeLogoutFeedback = { logoutFeedback.value = false }
         )
+    }
+}
+
+@Composable
+private fun DeviceBindingScreen(
+    isLoading: Boolean,
+    errorMessage: String?,
+    onBind: (String) -> Unit,
+    onClearError: () -> Unit,
+    onLogout: () -> Unit
+) {
+    var deviceCode by rememberSaveable { mutableStateOf("") }
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(AppScreenBackgroundColor)
+            .safeDrawingPadding()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = AppCardContainerColor),
+            border = BorderStroke(1.dp, AppCardBorderColor),
+            elevation = CardDefaults.cardElevation(defaultElevation = 4.dp),
+            shape = RoundedCornerShape(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 18.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "Vincular irrigador",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = AppCardTitleColor,
+                    fontWeight = FontWeight.SemiBold
+                )
+
+                Text(
+                    text = "Digite o código do irrigador exibido no painel local do ESP32.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = Color(0xFF3E4A59),
+                    textAlign = TextAlign.Center
+                )
+
+                OutlinedTextField(
+                    value = deviceCode,
+                    onValueChange = {
+                        deviceCode = it.trim().lowercase()
+                        if (errorMessage != null) onClearError()
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("Código do irrigador") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+                    enabled = !isLoading
+                )
+
+                if (!errorMessage.isNullOrBlank()) {
+                    Text(
+                        text = errorMessage,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFFB42318),
+                        textAlign = TextAlign.Center
+                    )
+                }
+
+                Button(
+                    onClick = { onBind(deviceCode) },
+                    enabled = !isLoading,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(containerColor = AppPrimaryGreen),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    if (isLoading) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            color = Color.White,
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Text("Vincular dispositivo", color = Color.White)
+                    }
+                }
+
+                TextButton(onClick = onLogout, enabled = !isLoading) {
+                    Text("Sair da conta")
+                }
+            }
+        }
     }
 }
 

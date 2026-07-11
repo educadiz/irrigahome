@@ -54,10 +54,29 @@ service cloud.firestore {
       allow create: if isAuthenticated()
         && validDeviceCreatePayload(request.auth.uid, deviceId);
 
-      // Atualização/deleção somente pelo dono, sem transferência de propriedade
-      allow update, delete: if isAuthenticated()
-        && resource.data.ownerUid == request.auth.uid
-        && request.resource.data.ownerUid == resource.data.ownerUid;
+      // Atualização sem transferência: dono mantém posse ou usuário faz claim inicial
+      allow update: if isAuthenticated()
+        && (
+          (
+            (resource.data.ownerUid is string)
+            && resource.data.ownerUid == request.auth.uid
+            && request.resource.data.ownerUid == resource.data.ownerUid
+          )
+          ||
+          (
+            (
+              !(resource.data.ownerUid is string)
+              || resource.data.ownerUid == ""
+            )
+            && request.resource.data.ownerUid == request.auth.uid
+            && request.resource.data.macAddress == deviceId
+          )
+        );
+
+      // Deleção somente pelo dono atual
+      allow delete: if isAuthenticated()
+        && (resource.data.ownerUid is string)
+        && resource.data.ownerUid == request.auth.uid;
     }
 
     // irrigationHistory/{deviceId} - DURANTE TESTES: liberar acesso completo

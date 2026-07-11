@@ -5,6 +5,7 @@ import com.google.firebase.Timestamp
 import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.firestore.DocumentSnapshot
 import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import com.nr.irrigahome.domain.model.DeviceProfile
 import javax.inject.Inject
 import javax.inject.Singleton
@@ -33,6 +34,8 @@ class DeviceRepository @Inject constructor(
     override fun clearCache() {
         cache.clear()
     }
+
+    fun hasAuthenticatedUser(): Boolean = auth.currentUser != null
 
     override fun fetchDeviceProfile(
         deviceId: String,
@@ -122,7 +125,11 @@ class DeviceRepository @Inject constructor(
                 val deviceIds = snapshot.documents
                     .mapNotNull { doc ->
                         val macAddress = doc.getString("macAddress")?.takeIf { it.isNotBlank() }
-                        if (macAddress != null) normalizeDeviceId(macAddress) else null
+                        when {
+                            macAddress != null -> normalizeDeviceId(macAddress)
+                            doc.id != "_placeholder" -> normalizeDeviceId(doc.id)
+                            else -> null
+                        }
                     }
                     .toSet()
 
@@ -132,6 +139,81 @@ class DeviceRepository @Inject constructor(
                 }
 
                 onSuccess(emptySet())
+            }
+            .addOnFailureListener(onError)
+    }
+
+    fun bindDeviceToCurrentUser(
+        deviceCode: String,
+        onSuccess: (String) -> Unit,
+        onError: (Throwable) -> Unit
+    ) {
+        val currentUid = auth.currentUser?.uid
+        if (currentUid.isNullOrBlank()) {
+            onError(IllegalStateException("Usuário não autenticado"))
+            return
+        }
+
+        val normalizedDeviceId = normalizeDeviceId(deviceCode)
+        if (normalizedDeviceId.isBlank()) {
+            onError(IllegalArgumentException("Código do irrigador inválido"))
+            return
+        }
+
+        val now = Timestamp.now()
+        val userDoc = firestore.collection("users").document(currentUid)
+        val userDeviceDoc = userDoc.collection("devices").document(normalizedDeviceId)
+        val placeholderDoc = userDoc.collection("devices").document("_placeholder")
+        val globalDeviceDoc = firestore.collection("devices").document(normalizedDeviceId)
+
+        firestore.runTransaction { tx ->
+            val globalSnapshot = tx.get(globalDeviceDoc)
+            val existingOwnerUid = globalSnapshot.getString("ownerUid")?.trim().orEmpty()
+
+            if (existingOwnerUid.isNotEmpty() && existingOwnerUid != currentUid) {
+                throw IllegalStateException("Este irrigador já está vinculado a outra conta")
+            }
+
+            tx.set(
+                globalDeviceDoc,
+                hashMapOf(
+                    "macAddress" to normalizedDeviceId,
+                    "ownerUid" to currentUid,
+                    "pairedAt" to now,
+                    "updatedAt" to now,
+                    "status" to "online"
+                ),
+                SetOptions.merge()
+            )
+
+            tx.set(
+                userDeviceDoc,
+                hashMapOf(
+                    "macAddress" to normalizedDeviceId,
+                    "ownerUid" to currentUid,
+                    "pairedAt" to now,
+                    "bindingState" to "linked",
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            )
+
+            tx.set(
+                userDoc,
+                hashMapOf(
+                    "primaryDeviceId" to normalizedDeviceId,
+                    "deviceBindingMode" to "macAddress",
+                    "updatedAt" to now
+                ),
+                SetOptions.merge()
+            )
+
+            tx.delete(placeholderDoc)
+            normalizedDeviceId
+        }
+            .addOnSuccessListener { linkedDeviceId ->
+                clearCache()
+                onSuccess(linkedDeviceId)
             }
             .addOnFailureListener(onError)
     }

@@ -111,6 +111,12 @@ class IrrigaViewModel @Inject constructor(
     private val _deviceValidationState = mutableStateOf(DeviceValidationState.Idle)
     val deviceValidationState: State<DeviceValidationState> = _deviceValidationState
 
+    private val _isBindingDevice = mutableStateOf(false)
+    val isBindingDevice: State<Boolean> = _isBindingDevice
+
+    private val _deviceBindingError = mutableStateOf<String?>(null)
+    val deviceBindingError: State<String?> = _deviceBindingError
+
     private val _hasReceivedSoilTelemetry = mutableStateOf(false)
 
     private var wateringJob: Job? = null
@@ -126,11 +132,50 @@ class IrrigaViewModel @Inject constructor(
         syncLinkedDeviceState()
     }
 
+    fun clearDeviceBindingError() {
+        updateOnMain { _deviceBindingError.value = null }
+    }
+
+    fun bindDeviceToCurrentUser(deviceCode: String) {
+        if (_isBindingDevice.value) return
+
+        val normalized = deviceCode.trim().lowercase().replace(":", "").replace("-", "")
+        if (normalized.isBlank()) {
+            updateOnMain { _deviceBindingError.value = "Informe o código do irrigador" }
+            return
+        }
+
+        updateOnMain {
+            _isBindingDevice.value = true
+            _deviceBindingError.value = null
+        }
+
+        deviceRepository.bindDeviceToCurrentUser(
+            deviceCode = normalized,
+            onSuccess = {
+                updateOnMain {
+                    _isBindingDevice.value = false
+                    _deviceBindingError.value = null
+                }
+                syncLinkedDeviceState()
+                carregarUltimosAgendamentos()
+            },
+            onError = { error ->
+                Log.w(TAG, "Falha ao vincular dispositivo", error)
+                updateOnMain {
+                    _isBindingDevice.value = false
+                    _deviceBindingError.value = error.message ?: "Não foi possível vincular o irrigador"
+                }
+            }
+        )
+    }
+
     fun resetSessionState() {
         wateringJob?.cancel()
         cooldownJob?.cancel()
         mqttManager.disconnect()
         deviceRepository.clearCache()
+        loadSavedSettings()
 
         updateOnMain {
             _isOnline.value = false
@@ -546,10 +591,24 @@ class IrrigaViewModel @Inject constructor(
     }
 
     private fun syncLinkedDeviceState() {
+        if (!deviceRepository.hasAuthenticatedUser()) {
+            updateOnMain {
+                _hasLinkedDevice.value = false
+                _deviceValidationState.value = DeviceValidationState.Idle
+                _deviceId.value = ""
+                _deviceDisplayName.value = ""
+                _deviceOwnerUid.value = null
+                _deviceFirmwareVersion.value = null
+            }
+            mqttManager.disconnect()
+            return
+        }
+
         updateOnMain { _deviceValidationState.value = DeviceValidationState.Loading }
 
         deviceRepository.fetchCurrentUserDeviceIds(
             onSuccess = { deviceIds ->
+                loadSavedSettings()
                 val deviceId = selectPrimaryDeviceId(deviceIds)
                 if (!deviceId.isNullOrBlank()) {
                     updateOnMain { _hasLinkedDevice.value = true }

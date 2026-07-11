@@ -2,12 +2,9 @@ package com.nr.irrigahome.util
 
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
-import com.nr.irrigahome.domain.usecase.LogoutUseCase
 import javax.inject.Inject
 
-class AppLifecycleObserver @Inject constructor(
-    private val logoutUseCase: LogoutUseCase
-) : DefaultLifecycleObserver {
+class AppLifecycleObserver @Inject constructor() : DefaultLifecycleObserver {
 
     override fun onStop(owner: LifecycleOwner) {
         SessionManager.onAppBackgrounded()
@@ -15,8 +12,7 @@ class AppLifecycleObserver @Inject constructor(
 
     override fun onStart(owner: LifecycleOwner) {
         if (SessionManager.shouldLogout()) {
-            logoutUseCase()
-            SessionManager.resetSession()
+            SessionManager.markAutoLogoutPending()
         } else {
             SessionManager.onAppForegrounded()
         }
