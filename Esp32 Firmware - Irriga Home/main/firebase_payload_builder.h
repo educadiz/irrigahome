@@ -159,7 +159,6 @@ private:
             case STOP_REASON_COMPLETED: return "completed";
             case STOP_REASON_MANUAL: return "manual";
             case STOP_REASON_NO_WATER: return "no_water";
-            case STOP_REASON_NO_FLOW: return "no_flow";
             default: return "completed";
         }
     }

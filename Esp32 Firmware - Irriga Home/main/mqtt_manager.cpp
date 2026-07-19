@@ -7,7 +7,6 @@
 #include "sensor_manager.h"
 #include "actuator_manager.h"
 #include "irrigation_event_manager.h"
-#include "flow_meter_manager.h"
 #include "firmware_logger.h"
 #include "firebase_payload_builder.h"
 #include <Arduino.h>
@@ -1170,30 +1169,6 @@ static int parseDurationFromSchedule(const String& scheduleJson) {
     return 0;
 }
 
-static bool parseFloatKey(const String& msg, const char* key, float* outVal) {
-    int keyPos = -1;
-    if (!findFirstKey(msg, key, &keyPos)) return false;
-    int colonPos = msg.indexOf(':', keyPos);
-    if (colonPos < 0) return false;
-    int i = colonPos + 1;
-    int len = msg.length();
-    while (i < len && (msg[i] == ' ' || msg[i] == '\t' || msg[i] == '"')) i++;
-    int start = i;
-    while (i < len) {
-        char c = msg[i];
-        if ((c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E') {
-            i++; continue;
-        }
-        break;
-    }
-    if (i <= start) return false;
-    String token = msg.substring(start, i);
-    token.trim();
-    float v = token.toFloat();
-    if (outVal) *outVal = v;
-    return true;
-}
-
 static bool parseHourMinute(const String& hhmm, int* outHour, int* outMinute) {
     int sep = hhmm.indexOf(':');
     if (sep <= 0) return false;
@@ -1485,26 +1460,6 @@ void callback(char* topic, byte* payload, unsigned int length) {
             atuador.flushConfig();
 
             Serial.println("[CONFIG] setConfig aplicado");
-            return;
-        }
-
-        if (hasAction && action == "setFlowCalibration") {
-            float scale = 0.0f;
-            float offset = 0.0f;
-            bool hasScale = parseFloatKey(msg, "scale", &scale);
-            bool hasOffset = parseFloatKey(msg, "offsetMl", &offset);
-
-            if (!hasScale) {
-                Serial.println("[MQTT] setFlowCalibration sem 'scale' - ignorando");
-                return;
-            }
-
-            extern FlowMeterManager flowMeter;
-            flowMeter.setVolumeCalibration(scale, hasOffset ? offset : 0.0f);
-
-            String ack = String("{\"action\":\"setFlowCalibration\",\"scale\":") + String(scale, 6) + ",\"offsetMl\":" + String(hasOffset ? offset : 0.0f, 3) + "}";
-            publishMessage(cachedTelemetryTopic, ack.c_str(), false);
-            Serial.println("[MQTT] setFlowCalibration aplicado");
             return;
         }
 

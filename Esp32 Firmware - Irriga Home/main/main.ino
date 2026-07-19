@@ -9,7 +9,6 @@
 #include "actuator_manager.h"
 #include "display_manager.h"
 #include "irrigation_event_manager.h"
-#include "flow_meter_manager.h"
 #include "web_server_manager.h"
 #include "firmware_logger.h"
 #include "config.h"
@@ -24,7 +23,6 @@ SensorManager sensores;
 ActuatorManager atuador;
 DisplayManager displayManager;
 IrrigationEventManager irrigationEventManager;
-FlowMeterManager flowMeter;
 WebServerManager webServer;
 
 // ===========================================================================
@@ -54,8 +52,6 @@ static const unsigned long SOLO_SECO_PERSISTENCIA_MS = 60000UL;
 static unsigned long soloUmidoAltoDesde = 0;
 static unsigned long lastControlTick = 0;
 static const unsigned long CONTROL_INTERVAL_MS = 2000UL;
-static const unsigned long FLOW_FLOW_WARNING_TIMEOUT_MS = 5000UL;
-static const unsigned long FLOW_NO_DETECTION_TIMEOUT_MS = 6000UL;
 static const uint32_t WATCHDOG_TIMEOUT_SECONDS = 8;
 static const unsigned long RESET_BUTTON_DEBOUNCE_MS = 50UL;
 
@@ -130,16 +126,12 @@ void setup() {
     irrigationEventManager.begin();
     fwLogLine("INFO", "SETUP", "Gerenciador de eventos inicializado");
     
-    fwLogSection("SETUP", "Flow meter");
-    flowMeter.begin();
-    fwLogLine("INFO", "SETUP", "Flow meter inicializado");
-    
     fwLogSection("SETUP", "MQTT");
     mqtt.begin(irrigationEventManager);  // injeta referencia — elimina extern implicito
     fwLogLine("INFO", "SETUP", "Cliente MQTT inicializado");
 
     fwLogSection("SETUP", "Servidor web de manutencao");
-    webServer.begin(sensores, atuador, flowMeter, irrigationEventManager);
+    webServer.begin(sensores, atuador, irrigationEventManager);
     fwLogLine("INFO", "SETUP", "Servidor web inicializado");
     
     fwLogSection("SETUP", "Display");
@@ -163,33 +155,6 @@ void loop() {
     irrigationEventManager.update();
 
     unsigned long now = millis();
-    bool safetyStopIssued = false;
-    static bool flowWarningIssued = false;
-
-    if (!atuador.isLigado() || atuador.getPumpStartedAtMs() == 0 || flowMeter.hasFlowDetected()) {
-        flowWarningIssued = false;
-    } else {
-        unsigned long elapsedSincePumpStart = (now >= atuador.getPumpStartedAtMs())
-            ? (now - atuador.getPumpStartedAtMs())
-            : 0;
-
-        if (!flowWarningIssued && elapsedSincePumpStart >= FLOW_FLOW_WARNING_TIMEOUT_MS) {
-            fwLogLine("WARN", "SAFETY", "Bomba ligada ha 5s sem fluxo; verificando pressurizacao");
-            flowWarningIssued = true;
-        }
-
-        if (elapsedSincePumpStart >= FLOW_NO_DETECTION_TIMEOUT_MS) {
-            fwLogLine("ERROR", "SAFETY", "Sem fluxo apos 6s; desligando bomba para protecao");
-            stopIrrigation(STOP_REASON_NO_FLOW);
-            safetyStopIssued = true;
-        }
-    }
-
-    if (safetyStopIssued) {
-        esp_task_wdt_reset();
-        vTaskDelay(1);
-        return;
-    }
 
     if ((now - lastControlTick) < CONTROL_INTERVAL_MS) {
         vTaskDelay(1);

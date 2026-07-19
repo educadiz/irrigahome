@@ -83,7 +83,6 @@ Presentation  →  Domain  →  Data
 | `mqtt_manager` | MQTT/TLS, telemetria delta, fila Firebase assíncrona |
 | `sensor_manager` | DHT22, solo ADC (6 amostras), bóia de nível, offsets calibráveis |
 | `actuator_manager` | Relé da bomba, modos, agendamentos (NVS) |
-| `flow_meter_manager` | Fluxômetro via ISR, calibração linear por mínimos quadrados |
 | `irrigation_event_manager` | Histórico JSONL em LittleFS, fila MQTT, deduplicação |
 | `display_manager` | Dashboard TFT ST7789, dirty flags, carrossel |
 | `web_server_manager` | SPA de manutenção (HTTP/80), offsets e diagnóstico |

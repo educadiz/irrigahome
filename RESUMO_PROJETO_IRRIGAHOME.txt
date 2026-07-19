@@ -63,7 +63,6 @@ IrrigaHome/
 |   |-- web_server_manager.{h,cpp}
 |   |-- sensor_manager.{h,cpp}
 |   |-- actuator_manager.{h,cpp}
-|   |-- flow_meter_manager.{h,cpp}
 |   |-- irrigation_event_manager.{h,cpp}
 |   |-- display_manager.{h,cpp}
 |   |-- maintenance-page.html
@@ -477,8 +476,6 @@ Observacao final:
     (ver MQTT_HEAP_CORRUPTION_FIX.md e DEADLOCK_FIX.md).
   - `web_server_manager` rodando como task separada; `maintenance-page.html` com
     endpoints de manutencao (logout, reset de agendas) para debug e configuracao local.
-  - `flow_meter_manager`: leituras de vazao, calibracao e log de eventos; inicializacao
-    validada no `main.ino`.
   - `actuator_manager`: persistencia de agendamentos, validacao de payloads por
     `deviceId`/`macAddress`, protecoes contra reentrancia durante acionamentos.
   - `irrigation_event_manager`: registro robusto de eventos de irrigacao (inicio/fim,

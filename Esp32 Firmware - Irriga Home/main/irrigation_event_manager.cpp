@@ -8,13 +8,15 @@
 #include <Arduino.h>
 #include <FS.h>
 #include <LittleFS.h>
-#include "flow_meter_manager.h"
+#include <Preferences.h>
 #include <string.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
 static const char* STATE_FILE = "/irrg_state.json";
 static const char* HISTORY_FILE = "/irrg_history.jsonl";
+static const char* FLOW_CAL_NAMESPACE = "irrigahome";
+static const char* FLOW_CAL_KEY = "flow_ml_min";
 static const unsigned long RECOVERY_CHECK_INTERVAL_MS = 5000UL;
 static unsigned long lastRecoveryCheck = 0;
 
@@ -110,6 +112,7 @@ void IrrigationEventManager::begin() {
         historyBuffer[i].nominalFlowRateMlPerMin = PUMP_NOMINAL_FLOW_ML_PER_MIN;
     }
 
+    loadNominalFlowRate();
     loadState();
     loadHistory();
 
@@ -132,12 +135,6 @@ void IrrigationEventManager::onIrrigationStart(IrrigationTriggerType trigger) {
     activeState.trigger = trigger;
 
     generateNewEventId();
-
-#ifdef FLOW_SENSOR_PIN
-    extern FlowMeterManager flowMeter;
-    Serial.println("[IRRG] Iniciando medição de vazão do sensor...");
-    flowMeter.startMeasurement();
-#endif
 
     if (_historyMutex) xSemaphoreTake(_historyMutex, portMAX_DELAY);
     saveState();
@@ -168,45 +165,17 @@ void IrrigationEventManager::onIrrigationEnd(IrrigationStopReason reason) {
     event.trigger = activeState.trigger;
     event.stopReason = reason;
 
-#ifdef FLOW_SENSOR_PIN
-    extern FlowMeterManager flowMeter;
-    fwLogLine("INFO", "FLOW", "Parando medicao de vazao; processando dados reais");
-    flowMeter.stopMeasurement();
-
-    event.totalPulses = flowMeter.getTotalPulses();
-    
-    // ── CORREÇÃO: Utilizando os dados reais processados com calibração pelo sensor ──
-    event.totalVolumeLiters = flowMeter.getTotalVolumeLiters();
-    event.totalVolumeMl = event.totalVolumeLiters * 1000.0f;
-    
-    if (event.durationSec > 0) {
-        event.avgFlowRateLpm = event.totalVolumeLiters / ((float)event.durationSec / 60.0f);
-    } else {
-        event.avgFlowRateLpm = 0.0f;
-    }
-
-    event.flowDetected = flowMeter.hasFlowDetected();
-    if (event.flowDetected) {
-        strncpy(event.flowStatus, "OK", sizeof(event.flowStatus) - 1);
-    } else {
-        strncpy(event.flowStatus, "ZERO_FLOW", sizeof(event.flowStatus) - 1);
-    }
-
-    event.nominalFlowRateMlPerMin = PUMP_NOMINAL_FLOW_ML_PER_MIN;
-    event.accountingVolumeMl = event.totalVolumeMl;
-    
-    fwLogf("INFO", "IRR", "Dados reais calculados | volume=%.3fL | volume_mL=%.1f | taxa=%.3fL/min | status=%s", 
-           event.totalVolumeLiters, event.totalVolumeMl, event.avgFlowRateLpm, event.flowStatus);
-#else
     event.totalPulses = 0;
-    event.totalVolumeLiters = 0.0;
-    event.avgFlowRateLpm = 0.0;
-    event.totalVolumeMl = 0.0f;
-    event.nominalFlowRateMlPerMin = PUMP_NOMINAL_FLOW_ML_PER_MIN;
+    event.nominalFlowRateMlPerMin = getNominalFlowRateMlPerMin();
     event.accountingVolumeMl = ((float)event.durationSec * event.nominalFlowRateMlPerMin) / 60.0f;
+    event.totalVolumeMl = event.accountingVolumeMl;
+    event.totalVolumeLiters = event.totalVolumeMl / 1000.0f;
+    event.avgFlowRateLpm = 0.0;
     event.flowDetected = false;
     strncpy(event.flowStatus, "N/A", sizeof(event.flowStatus) - 1);
-#endif
+
+    fwLogf("INFO", "IRR", "Volume estimado por duracao | volume=%.3fL | volume_mL=%.1f | nominal=%.1fmL/min",
+           event.totalVolumeLiters, event.totalVolumeMl, event.nominalFlowRateMlPerMin);
 
     bool enqueued = false;
     for (int i = 0; i < MAX_IRRIGATION_QUEUE; i++) {
@@ -273,7 +242,6 @@ const char* IrrigationEventManager::getStopReasonString(IrrigationStopReason rea
         case STOP_REASON_COMPLETED: return "completed";
         case STOP_REASON_MANUAL: return "manual";
         case STOP_REASON_NO_WATER: return "no_water";
-        case STOP_REASON_NO_FLOW: return "no_flow";
         default: return "unknown";
     }
 }
@@ -791,4 +759,46 @@ void IrrigationEventManager::markIdAsSent(const char* eventId) {
         strncpy(sentIds[MAX_SENT_IDS - 1], eventId, sizeof(sentIds[0]) - 1);
         sentIds[MAX_SENT_IDS - 1][sizeof(sentIds[0]) - 1] = '\0';
     }
+}
+
+void IrrigationEventManager::setNominalFlowRateMlPerMin(float value) {
+    if (!(value > 0.0f)) {
+        return;
+    }
+
+    portENTER_CRITICAL(&_flowRateMux);
+    _nominalFlowRateMlPerMin = value;
+    portEXIT_CRITICAL(&_flowRateMux);
+
+    Preferences prefs;
+    if (prefs.begin(FLOW_CAL_NAMESPACE, false)) {
+        prefs.putFloat(FLOW_CAL_KEY, value);
+        prefs.end();
+    }
+}
+
+float IrrigationEventManager::getNominalFlowRateMlPerMin() {
+    portENTER_CRITICAL(&_flowRateMux);
+    float value = _nominalFlowRateMlPerMin;
+    portEXIT_CRITICAL(&_flowRateMux);
+    return value;
+}
+
+void IrrigationEventManager::loadNominalFlowRate() {
+    Preferences prefs;
+    float loaded = PUMP_NOMINAL_FLOW_ML_PER_MIN;
+    if (prefs.begin(FLOW_CAL_NAMESPACE, true)) {
+        loaded = prefs.getFloat(FLOW_CAL_KEY, PUMP_NOMINAL_FLOW_ML_PER_MIN);
+        prefs.end();
+    }
+
+    if (!(loaded > 0.0f)) {
+        loaded = PUMP_NOMINAL_FLOW_ML_PER_MIN;
+    }
+
+    portENTER_CRITICAL(&_flowRateMux);
+    _nominalFlowRateMlPerMin = loaded;
+    portEXIT_CRITICAL(&_flowRateMux);
+
+    fwLogf("INFO", "IRR", "Vazao nominal carregada: %.1f mL/min", loaded);
 }

@@ -72,10 +72,6 @@ static inline void setOwnerUid(const String& uid) {
 #define WATER_LEVEL_PIN 5
 #define PUMP_PIN 18
 #define PUMP_LED 2  
-#define FLOW_SENSOR_PIN 23
-#define FLOW_PULSES_PER_LITER 260000
-#define FLOW_VOLUME_SCALE 1.0f
-#define FLOW_VOLUME_OFFSET_ML 0.0f
 #define PUMP_NOMINAL_FLOW_ML_PER_MIN 600.0f
 #define PUMP_NOMINAL_FLOW_LPM (PUMP_NOMINAL_FLOW_ML_PER_MIN / 1000.0f)
 

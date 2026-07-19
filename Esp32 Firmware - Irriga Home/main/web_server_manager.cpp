@@ -7,8 +7,10 @@
 #include "config.h"
 #include "firmware_logger.h" // Adicionado para padronizacao de logs
 #include <Arduino.h>
+#include <Preferences.h>
 #include <WebServer.h>
 #include <WiFi.h>
+#include <time.h>
 
 // ── Servidor e instancia global da task ──────────────────────────────────────
 static WebServer          server(80);
@@ -16,6 +18,15 @@ static WebServerManager* _instance = nullptr;
 // Simple authentication state (in-memory). Allows up to 3 attempts.
 static bool               _authValid = false;
 static int                _authAttemptsLeft = 3;
+static Preferences        flowPrefs;
+static constexpr const char* FLOW_UI_NAMESPACE = "irrigahome";
+static constexpr const char* FLOW_UI_KEY_LAST_TEST_AT = "flow_last_test_at";
+static constexpr const char* FLOW_UI_KEY_LAST_CAL_AT = "flow_last_cal_at";
+static constexpr const char* FLOW_UI_KEY_LAST_TEST_SEC = "flow_last_test_sec";
+
+static String lastFlowTestAtIso;
+static String lastFlowCalibrationAtIso;
+static int lastFlowTestDurationSec = 0;
 
 static void resetAuthState() {
   _authValid = false;
@@ -26,6 +37,44 @@ static String formatMacAddress() {
   String macAddress = WiFi.macAddress();
   macAddress.toLowerCase();
   return macAddress;
+}
+
+static String formatIso8601Now() {
+  time_t now = time(nullptr);
+  if (now < 1000000000L) {
+    return "";
+  }
+
+  struct tm timeinfo;
+  if (!gmtime_r(&now, &timeinfo)) {
+    return "";
+  }
+
+  char buffer[32];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(buffer);
+}
+
+static void loadFlowUiState() {
+  if (!flowPrefs.begin(FLOW_UI_NAMESPACE, true)) {
+    return;
+  }
+
+  lastFlowTestAtIso = flowPrefs.getString(FLOW_UI_KEY_LAST_TEST_AT, "");
+  lastFlowCalibrationAtIso = flowPrefs.getString(FLOW_UI_KEY_LAST_CAL_AT, "");
+  lastFlowTestDurationSec = flowPrefs.getInt(FLOW_UI_KEY_LAST_TEST_SEC, 0);
+  flowPrefs.end();
+}
+
+static void saveFlowUiState() {
+  if (!flowPrefs.begin(FLOW_UI_NAMESPACE, false)) {
+    return;
+  }
+
+  flowPrefs.putString(FLOW_UI_KEY_LAST_TEST_AT, lastFlowTestAtIso);
+  flowPrefs.putString(FLOW_UI_KEY_LAST_CAL_AT, lastFlowCalibrationAtIso);
+  flowPrefs.putInt(FLOW_UI_KEY_LAST_TEST_SEC, lastFlowTestDurationSec);
+  flowPrefs.end();
 }
 
 // ── HTML da pagina de manutencao (PROGMEM — nao consome RAM heap) ────────────
@@ -162,19 +211,35 @@ footer #lv-lastupdate.stale{color:var(--err);opacity:1;font-weight:600}
       </div>
 
       <hr>
-      <p class="subtitle">Vazão da bomba</p>
+      <p class="subtitle">Calibração de vazão estimada</p>
 
       <div class="cal-row">
-        <div class="top"><span class="label">Fator de escala</span><span class="range">0,1 a 5,0</span></div>
-        <div class="inp-wrap"><input type="number" id="flow-scale" min="0.1" max="5" step="0.0001" value="1.0"><span class="unit">×</span></div>
+        <div class="top"><span class="label">Vazão nominal atual</span><span class="range">mL/min</span></div>
+        <div class="inp-wrap"><input type="number" id="flow-nominal" disabled value="0.0"><span class="unit">mL/min</span></div>
       </div>
       <div class="cal-row">
-        <div class="top"><span class="label">Offset volumétrico</span><span class="range">−500 a +500</span></div>
-        <div class="inp-wrap">
-          <input type="number" id="flow-offset" min="-500" max="500" step="0.1" value="0.0">
-          <span class="unit">mL</span>
-          <button class="btn btn-ghost btn-sm" onclick="medir()" id="measure-btn">Medir</button>
-        </div>
+        <div class="top"><span class="label">Tempo de teste</span><span class="range">5 a 600 s</span></div>
+        <div class="inp-wrap"><input type="number" id="flow-test-seconds" min="5" max="600" step="1" value="30"><span class="unit">s</span></div>
+      </div>
+      <div class="cal-row">
+        <div class="top"><span class="label">Volume real medido</span><span class="range">1 a 15000 mL</span></div>
+        <div class="inp-wrap"><input type="number" id="flow-real-ml" min="1" max="15000" step="1" value="300"><span class="unit">mL</span></div>
+      </div>
+      <div class="cal-row">
+        <div class="top"><span class="label">Passo 1</span><span class="range">executa a bomba</span></div>
+        <div class="inp-wrap"><button class="btn btn-ghost" onclick="iniciarTesteVazao()">Iniciar teste temporizado</button></div>
+      </div>
+      <div class="cal-row">
+        <div class="top"><span class="label">Passo 2</span><span class="range">aplica nova vazão nominal</span></div>
+        <div class="inp-wrap"><button class="btn" onclick="calibrarVazaoEstimada()">Aplicar calibração</button></div>
+      </div>
+      <div class="cal-row">
+        <div class="top"><span class="label">Último teste executado</span><span class="range">data e hora</span></div>
+        <div class="inp-wrap"><input type="text" id="flow-last-test" disabled value="Nunca"><span class="unit">—</span></div>
+      </div>
+      <div class="cal-row">
+        <div class="top"><span class="label">Última calibração aplicada</span><span class="range">data e hora</span></div>
+        <div class="inp-wrap"><input type="text" id="flow-last-cal" disabled value="Nunca"><span class="unit">—</span></div>
       </div>
 
       <button class="btn btn-block" onclick="salvar()">Salvar calibração</button>
@@ -285,9 +350,13 @@ function atualizar(){
       $('off-solo').value=d.offSolo;
       $('off-temp').value=d.offTemp;
       $('off-ar').value=d.offAr;
-      $('flow-scale').value=d.flowScale;
-      $('flow-offset').value=d.flowOffsetMl;
+      $('flow-nominal').value=d.nominalFlowMlPerMin;
+      $('flow-last-test').value=d.lastFlowTestAt || 'Nunca';
+      $('flow-last-cal').value=d.lastFlowCalibrationAt || 'Nunca';
     }
+    $('flow-nominal').value=d.nominalFlowMlPerMin;
+    $('flow-last-test').value=d.lastFlowTestAt || 'Nunca';
+    $('flow-last-cal').value=d.lastFlowCalibrationAt || 'Nunca';
   }).catch(()=>{
     $('lv-lastupdate').classList.add('stale');
   });
@@ -303,23 +372,36 @@ function resetSchedules(){
 
 function salvar(){
   const body=new URLSearchParams({
-    offSolo:$('off-solo').value,offTemp:$('off-temp').value,offAr:$('off-ar').value,
-    flowScale:$('flow-scale').value,flowOffset:$('flow-offset').value
+    offSolo:$('off-solo').value,offTemp:$('off-temp').value,offAr:$('off-ar').value
   });
   fetch('/api/config',{method:'POST',body}).then(r=>r.json())
     .then(d=>toast(d.ok?'Calibração salva com sucesso!':'Erro ao salvar: '+d.error,!d.ok))
     .catch(()=>toast('Falha na comunicação com o irrigador',true));
 }
 
-function medir(){
-  let duration=prompt('Duração em segundos para medir (ex: 10):','10');
-  if(duration===null)return;
-  duration=parseInt(duration,10);
-  if(isNaN(duration)||duration<=0){toast('Duração inválida',true);return;}
-  fetch('/api/measure',{method:'POST',body:new URLSearchParams({duration:String(duration)})})
+function iniciarTesteVazao(){
+  const duration=parseInt($('flow-test-seconds').value,10);
+  if(isNaN(duration)||duration<5||duration>600){toast('Tempo de teste inválido',true);return;}
+  fetch('/api/flow-test/start',{method:'POST',body:new URLSearchParams({durationSec:String(duration)})})
     .then(r=>r.json()).then(d=>{
-      if(d.ok)toast('Medição iniciada por '+duration+'s');
-      else toast('Falha ao iniciar medição: '+(d.error||'unauthorized'),true);
+      if(d.ok)toast('Teste iniciado por '+d.durationSec+'s. Meça o volume real coletado.');
+      else toast('Falha ao iniciar teste: '+(d.error||'erro'),true);
+    }).catch(()=>toast('Falha na comunicação com o irrigador',true));
+}
+
+function calibrarVazaoEstimada(){
+  const duration=parseInt($('flow-test-seconds').value,10);
+  const realMl=parseFloat($('flow-real-ml').value);
+  if(isNaN(duration)||duration<5||duration>600){toast('Tempo de teste inválido',true);return;}
+  if(isNaN(realMl)||realMl<=0){toast('Volume real inválido',true);return;}
+  fetch('/api/flow-calibration',{method:'POST',body:new URLSearchParams({durationSec:String(duration),realVolumeMl:String(realMl)})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){
+        $('flow-nominal').value=d.nominalFlowMlPerMin;
+        toast('Calibração aplicada: '+d.nominalFlowMlPerMin+' mL/min');
+      }else{
+        toast('Falha na calibração: '+(d.error||'erro'),true);
+      }
     }).catch(()=>toast('Falha na comunicação com o irrigador',true));
 }
 
@@ -334,21 +416,21 @@ setInterval(atualizar,3000);
 // ── Implementacao ─────────────────────────────────────────────────────────────
 
 void WebServerManager::begin(SensorManager& sensors, ActuatorManager& actuator,
-                FlowMeterManager& flow,
                 IrrigationEventManager& eventManager) {
     _sensors  = &sensors;
     _actuator = &actuator;
-    _flow     = &flow;
   _eventManager = &eventManager;
     _instance = this;
+    loadFlowUiState();
 
     // Registra as rotas HTTP (seguro fazer antes de abrir o servidor)
     server.on("/",          HTTP_GET,  []{ if (_instance) _instance->handleRoot();   });
     server.on("/api/data",  HTTP_GET,  []{ if (_instance) _instance->handleData();   });
     server.on("/api/auth",  HTTP_POST, []{ if (_instance) _instance->handleAuth();   });
     server.on("/api/logout", HTTP_POST, []{ if (_instance) _instance->handleLogout(); });
-    server.on("/api/measure", HTTP_POST, []{ if (_instance) _instance->handleMeasure(); });
     server.on("/api/config",HTTP_POST, []{ if (_instance) _instance->handleConfig(); });
+    server.on("/api/flow-test/start", HTTP_POST, []{ if (_instance) _instance->handleFlowTestStart(); });
+    server.on("/api/flow-calibration", HTTP_POST, []{ if (_instance) _instance->handleFlowCalibration(); });
     server.on("/api/schedules/reset", HTTP_POST, []{ if (_instance) _instance->handleResetSchedules(); });
 
     // Apenas informa que as rotas estao prontas. A porta 80 sera aberta na _task apos o WiFi conectar.
@@ -390,7 +472,7 @@ void WebServerManager::handleRoot() {
 }
 
 void WebServerManager::handleData() {
-    if (!_sensors || !_actuator || !_flow) {
+  if (!_sensors || !_actuator) {
         server.send(503, "application/json", "{\"error\":\"not ready\"}");
         return;
     }
@@ -414,8 +496,9 @@ void WebServerManager::handleData() {
         "\"offSolo\":%.1f,"
         "\"offTemp\":%.1f,"
         "\"offAr\":%.1f,"
-        "\"flowScale\":%.6f,"
-        "\"flowOffsetMl\":%.3f"
+          "\"nominalFlowMlPerMin\":%.1f,"
+          "\"lastFlowTestAt\":\"%s\","
+          "\"lastFlowCalibrationAt\":\"%s\""
         "}",
         getDeviceIdFromMac().c_str(),
         macAddress.c_str(),
@@ -430,8 +513,9 @@ void WebServerManager::handleData() {
         (double)_sensors->getOffsetUmidadeSolo(),
         (double)_sensors->getOffsetTemperatura(),
         (double)_sensors->getOffsetUmidadeAr(),
-        _flow->getVolumeCalibrationScale(),
-        _flow->getVolumeCalibrationOffsetMl()
+        _eventManager ? _eventManager->getNominalFlowRateMlPerMin() : (double)PUMP_NOMINAL_FLOW_ML_PER_MIN,
+        lastFlowTestAtIso.c_str(),
+        lastFlowCalibrationAtIso.c_str()
     );
 
     server.send(200, "application/json", json);
@@ -477,40 +561,6 @@ void WebServerManager::handleLogout() {
   fwLogLine("INFO", "WEB", "Usuario saiu da manutencao");
 }
 
-void WebServerManager::handleMeasure() {
-  if (!_authValid) {
-    server.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
-    return;
-  }
-
-  if (!_actuator) {
-    server.send(503, "application/json", "{\"ok\":false,\"error\":\"not ready\"}");
-    return;
-  }
-
-  int duration = 10;
-  if (server.hasArg("duration")) {
-    duration = server.arg("duration").toInt();
-    if (duration < 1) duration = 1;
-    if (duration > 300) duration = 300;
-  }
-
-  if (_actuator->isLigado()) {
-    server.send(400, "application/json", "{\"ok\":false,\"error\":\"pump already on\"}");
-    return;
-  }
-
-  _actuator->setCurrentTrigger(TRIGGER_MANUAL);
-  _actuator->ligar();
-  if (_eventManager) {
-    _eventManager->onIrrigationStart(TRIGGER_MANUAL);
-  }
-  unsigned long now = millis();
-  _actuator->setActiveUntil(now + ((unsigned long)duration * 1000UL));
-
-  server.send(200, "application/json", "{\"ok\":true}");
-}
-
 void WebServerManager::handleResetSchedules() {
   if (!_authValid) {
     server.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
@@ -532,9 +582,7 @@ void WebServerManager::handleConfig() {
         return;
     }
     
-    if (!server.hasArg("offSolo")    || !server.hasArg("offTemp") ||
-        !server.hasArg("offAr")      || !server.hasArg("flowScale") ||
-        !server.hasArg("flowOffset")) {
+    if (!server.hasArg("offSolo") || !server.hasArg("offTemp") || !server.hasArg("offAr")) {
         server.send(400, "application/json", "{\"ok\":false,\"error\":\"parametros ausentes\"}");
         return;
     }
@@ -542,14 +590,10 @@ void WebServerManager::handleConfig() {
     float offTemp   = server.arg("offTemp").toFloat();
     float offSolo   = server.arg("offSolo").toFloat();
     float offAr     = server.arg("offAr").toFloat();
-    float flowScale = server.arg("flowScale").toFloat();
-    float flowOff   = server.arg("flowOffset").toFloat();
 
     if (offTemp   < -10.0f || offTemp   > 10.0f  ||
         offSolo   < -30.0f || offSolo   > 30.0f   ||
-        offAr     < -20.0f || offAr     > 20.0f   ||
-        flowScale <=  0.0f || flowScale > 5.0f     ||
-        flowOff   < -500.0f|| flowOff   > 500.0f) {
+      offAr     < -20.0f || offAr     > 20.0f) {
         server.send(400, "application/json", "{\"ok\":false,\"error\":\"valor fora do limite permitido\"}");
         return;
     }
@@ -559,8 +603,6 @@ void WebServerManager::handleConfig() {
     _pending.offTemp    = offTemp;
     _pending.offSolo    = offSolo;
     _pending.offUmidAr  = offAr;
-    _pending.flowScale  = flowScale;
-    _pending.flowOffset = flowOff;
     _pending.pending    = true;   
     portEXIT_CRITICAL(&_pendingMux);
 
@@ -589,11 +631,100 @@ void WebServerManager::applyPendingConfig() {
         _sensors->flushOffsets();   
     }
 
-    if (_flow) {
-        _flow->setVolumeCalibration(localCopy.flowScale, localCopy.flowOffset);
-    }
-
     fwLogLine("INFO", "WEB", "Calibracao aplicada via pagina de manutencao");
-    fwLogf("INFO", "WEB", "offSolo=%.1f | offTemp=%.1f | offAr=%.1f | flowScale=%.6f | flowOffsetMl=%.3f",
-           localCopy.offSolo, localCopy.offTemp, localCopy.offUmidAr, localCopy.flowScale, localCopy.flowOffset);
+    fwLogf("INFO", "WEB", "offSolo=%.1f | offTemp=%.1f | offAr=%.1f",
+         localCopy.offSolo, localCopy.offTemp, localCopy.offUmidAr);
+}
+
+void WebServerManager::handleFlowTestStart() {
+  if (!_authValid) {
+    server.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+    return;
+  }
+
+  if (!_actuator || !_eventManager || !_sensors) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"not ready\"}");
+    return;
+  }
+
+  if (!server.hasArg("durationSec")) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"parametros ausentes\"}");
+    return;
+  }
+
+  int durationSec = server.arg("durationSec").toInt();
+  if (durationSec < 5 || durationSec > 600) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"duracao invalida\"}");
+    return;
+  }
+
+  if (_actuator->isLigado()) {
+    server.send(409, "application/json", "{\"ok\":false,\"error\":\"pump already on\"}");
+    return;
+  }
+
+  SensorData data = _sensors->read();
+  if (!data.nivelAgua) {
+    server.send(409, "application/json", "{\"ok\":false,\"error\":\"no water\"}");
+    return;
+  }
+
+  _actuator->setCurrentTrigger(TRIGGER_MANUAL);
+  _actuator->ligar();
+  _eventManager->onIrrigationStart(TRIGGER_MANUAL);
+  unsigned long now = millis();
+  _actuator->setActiveUntil(now + ((unsigned long)durationSec * 1000UL));
+  lastFlowTestAtIso = formatIso8601Now();
+  lastFlowTestDurationSec = durationSec;
+  saveFlowUiState();
+
+  char json[120];
+  snprintf(json, sizeof(json), "{\"ok\":true,\"durationSec\":%d}", durationSec);
+  server.send(200, "application/json", json);
+}
+
+void WebServerManager::handleFlowCalibration() {
+  if (!_authValid) {
+    server.send(401, "application/json", "{\"ok\":false,\"error\":\"unauthorized\"}");
+    return;
+  }
+
+  if (!_eventManager) {
+    server.send(503, "application/json", "{\"ok\":false,\"error\":\"not ready\"}");
+    return;
+  }
+
+  if (_actuator && _actuator->isLigado()) {
+    server.send(409, "application/json", "{\"ok\":false,\"error\":\"pump already on\"}");
+    return;
+  }
+
+  if (!server.hasArg("durationSec") || !server.hasArg("realVolumeMl")) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"parametros ausentes\"}");
+    return;
+  }
+
+  float durationSec = server.arg("durationSec").toFloat();
+  float realVolumeMl = server.arg("realVolumeMl").toFloat();
+
+  if (!(durationSec >= 5.0f && durationSec <= 600.0f) || !(realVolumeMl > 0.0f && realVolumeMl <= 15000.0f)) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"valores invalidos\"}");
+    return;
+  }
+
+  float nominalMlPerMin = (realVolumeMl * 60.0f) / durationSec;
+  if (!(nominalMlPerMin >= 50.0f && nominalMlPerMin <= 5000.0f)) {
+    server.send(400, "application/json", "{\"ok\":false,\"error\":\"resultado fora da faixa (50-5000 mL/min)\"}");
+    return;
+  }
+
+  _eventManager->setNominalFlowRateMlPerMin(nominalMlPerMin);
+  lastFlowCalibrationAtIso = formatIso8601Now();
+  saveFlowUiState();
+
+  char json[180];
+  snprintf(json, sizeof(json),
+       "{\"ok\":true,\"nominalFlowMlPerMin\":%.1f,\"durationSec\":%.0f,\"realVolumeMl\":%.1f}",
+       nominalMlPerMin, durationSec, realVolumeMl);
+  server.send(200, "application/json", json);
 }

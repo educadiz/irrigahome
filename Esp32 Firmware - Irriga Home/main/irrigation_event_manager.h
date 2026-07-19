@@ -17,7 +17,6 @@ typedef enum {
     STOP_REASON_COMPLETED = 0,
     STOP_REASON_MANUAL    = 1,
     STOP_REASON_NO_WATER  = 2,
-    STOP_REASON_NO_FLOW   = 3,
 } IrrigationStopReason;
 
 // Estrutura de um evento de irrigação completo
@@ -87,6 +86,9 @@ public:
     int getHistoryCount();
     bool getHistoryEvent(int index, IrrigationHistoryEntry* outEvent);
 
+    void setNominalFlowRateMlPerMin(float value);
+    float getNominalFlowRateMlPerMin();
+
     static bool formatIso8601(time_t timestamp, char* outBuffer, int bufferSize);
     static char* generateEventId(char* outBuffer, int bufferSize);
 
@@ -103,8 +105,11 @@ private:
     bool loadHistory();
     void saveHistory();
     void addHistoryEvent(const IrrigationEvent& event);
+    void loadNominalFlowRate();
 
     SemaphoreHandle_t _historyMutex = nullptr;
+    portMUX_TYPE _flowRateMux = portMUX_INITIALIZER_UNLOCKED;
+    float _nominalFlowRateMlPerMin = PUMP_NOMINAL_FLOW_ML_PER_MIN;
 
     static const int MAX_SENT_IDS = 40;
     char sentIds[MAX_SENT_IDS][24];
