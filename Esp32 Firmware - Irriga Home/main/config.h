@@ -99,8 +99,8 @@ static inline void setOwnerUid(const String& uid) {
 #define SOIL_ADC_SAMPLES 6
 
 // ACIONAMENTO DA BOMBA
-#define PUMP_ON LOW
-#define PUMP_OFF HIGH
+#define PUMP_ON HIGH
+#define PUMP_OFF LOW
 #define PUMP_LED_ON HIGH
 #define PUMP_LED_OFF LOW
 

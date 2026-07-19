@@ -15,6 +15,7 @@
 #include "config.h"
 #include <time.h>
 #include <esp_task_wdt.h>
+#include <esp_system.h>
 
 
 WiFiManagerCustom wifi;
@@ -56,11 +57,31 @@ static const unsigned long CONTROL_INTERVAL_MS = 2000UL;
 static const unsigned long FLOW_FLOW_WARNING_TIMEOUT_MS = 5000UL;
 static const unsigned long FLOW_NO_DETECTION_TIMEOUT_MS = 6000UL;
 static const uint32_t WATCHDOG_TIMEOUT_SECONDS = 8;
+static const unsigned long RESET_BUTTON_DEBOUNCE_MS = 50UL;
+
+static bool resetButtonPressed() {
+    static unsigned long pressedSince = 0;
+    int level = digitalRead(RESET);
+
+    if (level == LOW) {
+        if (pressedSince == 0) {
+            pressedSince = millis();
+            return false;
+        }
+        return (millis() - pressedSince) >= RESET_BUTTON_DEBOUNCE_MS;
+    }
+
+    pressedSince = 0;
+    return false;
+}
 
 void setup() {
     Serial.begin(115200);
     delay(500); // Give serial time to init
     fwLogSection("SETUP", "Inicializacao do firmware Irriga Home");
+
+    pinMode(RESET, INPUT_PULLUP);
+    fwLogf("INFO", "SETUP", "Botao reset configurado no GPIO%d (ativo em LOW)", RESET);
 
     // Inicializar watchdog apenas uma vez (evita TWDT already initialized)
     static bool wdtInitialized = false;
@@ -129,6 +150,12 @@ void setup() {
 }
 
 void loop() {
+
+    if (resetButtonPressed()) {
+        fwLogLine("WARN", "RESET", "Botao pressionado; reiniciando dispositivo");
+        delay(20);
+        esp_restart();
+    }
 
     wifi.loop();
     mqtt.loop();
