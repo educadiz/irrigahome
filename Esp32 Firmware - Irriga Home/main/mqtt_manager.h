@@ -26,7 +26,7 @@ public:
 
     void syncSchedulesFromFirestore();
 
-    void sendIrrigationEventToFirebase(const char* eventId, const char* startAtIso,
+    bool sendIrrigationEventToFirebase(const char* eventId, const char* startAtIso,
                                        const char* endAtIso, int durationSec,
                                        const char* triggerType,
                                        IrrigationStopReason stopReason = STOP_REASON_COMPLETED,

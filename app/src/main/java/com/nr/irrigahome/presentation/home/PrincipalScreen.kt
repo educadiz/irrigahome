@@ -22,6 +22,7 @@
 
 package com.nr.irrigahome.presentation.home
 
+import com.nr.irrigahome.BuildConfig
 import com.nr.irrigahome.domain.model.ConflictCheckResult
 import com.nr.irrigahome.domain.model.IrrigationMode
 import com.nr.irrigahome.ui.components.LoadingPopup
@@ -550,6 +551,16 @@ private fun SettingsDialog(
                         fontSize = 14.sp
                     )
                 }
+
+                Text(
+                    text = "Versão ${BuildConfig.VERSION_NAME}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = AppCardTitleColor.copy(alpha = 0.65f),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
         }
     }
@@ -1240,19 +1251,10 @@ fun WaterButton(
 ) {
     val isAutomaticMode = irrigationMode == IrrigationMode.AUTOMATIC
     val cooldownActive = cooldownRemainingSeconds > 0
-    val modePhrase = if (irrigationMode == IrrigationMode.AUTOMATIC) "automática" else "manual"
-    val scheduledDurationSeconds = if (irrigationMode == IrrigationMode.AUTOMATIC) {
-        automaticWaterDurationSeconds
-    } else {
-        manualWaterDurationSeconds
-    }
+    val modePhrase = "manual"
 
     Button(
         onClick = {
-            // Guard local: rejeita o toque se qualquer condição de bloqueio for verdadeira,
-            // independentemente do estado de `enabled`. Isso cobre a janela de um frame
-            // em que o Compose ainda não recompôs o botão após uma mudança de modo,
-            // e toques buffereados pelo sistema de gestos do Android poderiam vazar.
             val canFire = !isAutomaticMode
                 && !isWatering
                 && !cooldownActive
@@ -1272,13 +1274,13 @@ fun WaterButton(
     ) {
         Text(
             text = when {
-                    isAutomaticMode -> "Irrigação em modo automático"
+                isAutomaticMode -> "Irrigação em modo automático"
                     isWatering -> "Acionamento manual • irrigando... ${wateringRemainingSeconds}s"
                     cooldownActive -> "Irrigação bloqueada por ${cooldownRemainingSeconds}s"
                     isTempBlocked -> "Segurança térmica ativada: $currentTempC°C > ${maxManualWaterTempC}°C"
                     !isOnline -> "Aguardando conexão com irrigador..."
                     level != "Cheio" -> "⚠️ Sem água no reservatório"
-                    else -> "Irrigação $modePhrase por ${scheduledDurationSeconds} seg."
+                else -> "Irrigação $modePhrase por ${manualWaterDurationSeconds} seg."
             },
             style = MaterialTheme.typography.labelLarge,
             textAlign = TextAlign.Center,

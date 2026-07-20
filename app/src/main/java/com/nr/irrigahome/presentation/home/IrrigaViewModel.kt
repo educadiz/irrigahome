@@ -455,7 +455,7 @@ class IrrigaViewModel @Inject constructor(
 
     private fun executeManualIrrigation() {
         startWateringCycle(
-            durationSeconds = getSelectedWateringDurationSeconds(),
+            durationSeconds = _manualWaterDurationSeconds.intValue,
             cooldownSeconds = getSelectedCooldownSeconds(),
             triggerType = "manual"
         )

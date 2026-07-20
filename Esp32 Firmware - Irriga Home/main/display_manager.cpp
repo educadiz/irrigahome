@@ -655,7 +655,8 @@ void DisplayManager::showSplash() {
     display.setTextColor(COLOR_DIM);
     int16_t x1, y1;
     uint16_t w, h;
-    const char* footerText = "E.Cadiz | 2026";
+    const String footer = String("v") + IRRIGAHOME_FIRMWARE_VERSION + " | E.Cadiz 2026";
+    const char* footerText = footer.c_str();
     display.getTextBounds(footerText, 0, 0, &x1, &y1, &w, &h);
     display.setCursor((SCREEN_WIDTH - w) / 2, 295);
     display.print(footerText);

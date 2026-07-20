@@ -214,7 +214,11 @@ class MqttManager @Inject constructor() {
     }
 
     private fun publishCommandPayload(payload: JSONObject) {
-        val commands = commandsTopic() ?: return
+        if (client?.isConnected != true) {
+            connect()
+        }
+
+        val commands = commandsTopic() ?: "irrigahome/commands"
         val message = MqttMessage(payload.toString().toByteArray()).apply {
             qos = 1
             isRetained = false

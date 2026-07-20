@@ -247,7 +247,7 @@ footer #lv-lastupdate.stale{color:var(--err);opacity:1;font-weight:600}
 
   </div>
 
-  <footer>Irriga Home · E.Cadiz © 2026<br><span id="lv-lastupdate">Aguardando dados…</span></footer>
+  <footer>Irriga Home · E.Cadiz © 2026 · <span id="fw-version">v-</span><br><span id="lv-lastupdate">Aguardando dados…</span></footer>
 </div>
 
 <div class="overlay" id="auth-overlay">
@@ -344,6 +344,7 @@ function atualizar(){
 
     $('lv-lastupdate').textContent='Última atualização: '+fmtHora(new Date());
     $('lv-lastupdate').classList.remove('stale');
+    $('fw-version').textContent='v'+(d.firmwareVersion || 'n/d');
 
     if(!window._loaded){
       window._loaded=true;
@@ -480,11 +481,12 @@ void WebServerManager::handleData() {
     SensorData d = _sensors->read();
     String macAddress = formatMacAddress();
 
-    char json[460];
+    char json[620];
     snprintf(json, sizeof(json),
         "{"
       "\"deviceId\":\"%s\"," 
       "\"macAddress\":\"%s\"," 
+      "\"firmwareVersion\":\"%s\"," 
         "\"soil\":%d,"
         "\"temp\":%.1f,"
         "\"humidity\":%.1f,"
@@ -502,6 +504,7 @@ void WebServerManager::handleData() {
         "}",
         getDeviceIdFromMac().c_str(),
         macAddress.c_str(),
+        IRRIGAHOME_FIRMWARE_VERSION,
         d.umidadeSolo,
         isnan(d.temperatura) ? 0.0f : d.temperatura,
         isnan(d.umidadeAr)   ? 0.0f : d.umidadeAr,

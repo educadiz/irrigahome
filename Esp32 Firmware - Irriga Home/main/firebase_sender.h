@@ -26,8 +26,13 @@ public:
         String payload = FirebasePayloadBuilder::buildIrrigationEventPayload(event);
         
         HTTPClient http;
-        http.begin(FIREBASE_SAVE_EVENT_URL);
+        WiFiClientSecure httpsClient;
+        httpsClient.setInsecure();
+        httpsClient.setTimeout(15000);
+
+        http.begin(httpsClient, FIREBASE_SAVE_EVENT_URL);
         http.addHeader("Content-Type", "application/json");
+        http.setTimeout(15000);
         
         fwLogf("INFO", "FIRE", "Enviando evento para Firebase: %s", event.eventId);
         Serial.println("📤 Payload:");

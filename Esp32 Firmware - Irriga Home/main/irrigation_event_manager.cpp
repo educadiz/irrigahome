@@ -116,6 +116,47 @@ void IrrigationEventManager::begin() {
     loadState();
     loadHistory();
 
+    // Recuperar eventos nao enviados do LittleFS: re-enfileira em eventQueue
+    // para que o mqtt_manager possa retransmiti-los apos um reboot.
+    int recovered = 0;
+    for (int i = 0; i < historyCount; i++) {
+        const IrrigationHistoryEntry& h = historyBuffer[i];
+        if (h.sentToFirebase) continue;
+        bool requeued = false;
+        for (int j = 0; j < MAX_IRRIGATION_QUEUE; j++) {
+            if (!eventQueue[j].used) {
+                eventQueue[j].used                    = true;
+                eventQueue[j].sentToMqtt              = false;
+                strncpy(eventQueue[j].eventId, h.eventId, sizeof(eventQueue[j].eventId) - 1);
+                eventQueue[j].eventId[sizeof(eventQueue[j].eventId) - 1] = '\0';
+                eventQueue[j].startAt                 = h.startAt;
+                eventQueue[j].endAt                   = h.endAt;
+                eventQueue[j].durationSec             = h.durationSec;
+                eventQueue[j].trigger                 = h.trigger;
+                eventQueue[j].stopReason              = h.stopReason;
+                eventQueue[j].totalPulses             = h.totalPulses;
+                eventQueue[j].totalVolumeLiters       = h.totalVolumeLiters;
+                eventQueue[j].avgFlowRateLpm          = h.avgFlowRateLpm;
+                eventQueue[j].totalVolumeMl           = h.totalVolumeMl;
+                eventQueue[j].accountingVolumeMl      = h.accountingVolumeMl;
+                eventQueue[j].nominalFlowRateMlPerMin = h.nominalFlowRateMlPerMin;
+                eventQueue[j].flowDetected            = false;
+                strncpy(eventQueue[j].flowStatus, "N/A", sizeof(eventQueue[j].flowStatus) - 1);
+                eventQueue[j].flowStatus[sizeof(eventQueue[j].flowStatus) - 1] = '\0';
+                requeued = true;
+                recovered++;
+                fwLogf("INFO", "IRR", "Evento recuperado do historico: %s", h.eventId);
+                break;
+            }
+        }
+        if (!requeued) {
+            fwLogf("WARN", "IRR", "Fila cheia; evento historico nao re-enfileirado: %s", h.eventId);
+        }
+    }
+    if (recovered > 0) {
+        fwLogf("INFO", "IRR", "%d evento(s) pendente(s) recuperado(s) do LittleFS para reenvio", recovered);
+    }
+
     Serial.print("💧 IrrigationEventManager iniciado. Estado ativo: ");
     Serial.println(activeState.isActive ? "SIM" : "NÃO");
 }

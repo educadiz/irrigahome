@@ -16,6 +16,11 @@
 // Nome amigavel local do dispositivo.
 #define DEVICE_NAME "Jardim_01"
 
+// Versao do projeto/firmware. Atualize este valor a cada release para manter
+// app, firmware e painel de manutencao sincronizados.
+#define IRRIGAHOME_PROJECT_VERSION "1.1.0"
+#define IRRIGAHOME_FIRMWARE_VERSION IRRIGAHOME_PROJECT_VERSION
+
 static inline String getDeviceIdFromMac() {
 	String deviceId = WiFi.macAddress();
 	deviceId.replace(":", "");

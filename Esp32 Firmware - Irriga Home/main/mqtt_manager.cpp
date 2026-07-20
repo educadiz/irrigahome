@@ -24,6 +24,7 @@ static char cachedDeviceId[32] = {0};
 static char cachedTelemetryTopic[64] = {0};
 static char cachedStatusTopic[64] = {0};
 static char cachedCommandsTopic[64] = {0};
+static const char* LEGACY_COMMANDS_TOPIC = "irrigahome/commands";
 static const char* HISTORY_COLLECTION_NAME = "events";
 static char pendingStatusPayload[160] = {0};
 static bool pendingStatusPublish = false;
@@ -219,12 +220,12 @@ static void firebaseTask(void* pvParameters) {
             if (payload.jsonPayload[0] != '\0') {
                 WiFiClientSecure httpsClient;
                 httpsClient.setInsecure();
-                httpsClient.setTimeout(10);
+                httpsClient.setTimeout(15000);
 
                 HTTPClient http;
                 http.begin(httpsClient, FIREBASE_SAVE_EVENT_URL);
                 http.addHeader("Content-Type", "application/json");
-                http.setTimeout(5000);
+                http.setTimeout(15000);
 
                 Serial.print("[FIREBASE] Enviando JSON para: ");
                 Serial.println(FIREBASE_SAVE_EVENT_URL);
@@ -317,7 +318,7 @@ static void firebaseTask(void* pvParameters) {
 
 // ==================== ENVIO PARA FIREBASE ====================
 
-void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
+bool MqttManager::sendIrrigationEventToFirebase(const char* eventId,
                                                  const char* startAtIso,
                                                  const char* endAtIso,
                                                  int durationSec,
@@ -351,24 +352,43 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
 
     if (!eventId || !startAtIso || !triggerType) {
         Serial.println("[FIREBASE] parametros invalidos");
-        return;
+        return false;
     }
 
     if (firebaseQueue == nullptr) {
         Serial.println("[FIREBASE] fila nao inicializada");
-        return;
+        return false;
     }
 
     if (g_eventMgr == nullptr) {
         Serial.println("[FIREBASE] eventMgr nao injetado");
-        return;
+        return false;
     }
+
+    // Converte ISO 8601 UTC ("2024-01-15T10:30:00Z") para Unix timestamp.
+    // atol() de uma string ISO retorna apenas o componente numerico inicial
+    // (ex: 2024), que e' invalido como time_t; por isso usamos sscanf.
+    auto parseIso8601Utc = [](const char* iso) -> time_t {
+        if (!iso || strlen(iso) < 19) return 0;
+        int yr = 0, mo = 0, dy = 0, hr = 0, mn = 0, sc = 0;
+        if (sscanf(iso, "%4d-%2d-%2dT%2d:%2d:%2d", &yr, &mo, &dy, &hr, &mn, &sc) != 6) return 0;
+        const int dim[] = {0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+        long days = 0;
+        for (int y = 1970; y < yr; y++) {
+            bool leap = (y % 4 == 0 && (y % 100 != 0 || y % 400 == 0));
+            days += leap ? 366 : 365;
+        }
+        bool leap = (yr % 4 == 0 && (yr % 100 != 0 || yr % 400 == 0));
+        for (int m = 1; m < mo; m++) { days += (m == 2 && leap) ? 29 : dim[m]; }
+        days += dy - 1;
+        return (time_t)(days * 86400L + (long)hr * 3600L + mn * 60L + sc);
+    };
 
     IrrigationEvent event;
     event.used = true;
     strncpy(event.eventId, eventId, sizeof(event.eventId) - 1);
-    event.startAt = (time_t)atol(startAtIso);
-    event.endAt = (time_t)atol(endAtIso);
+    event.startAt = parseIso8601Utc(startAtIso);
+    event.endAt   = parseIso8601Utc(endAtIso);
     event.durationSec = durationSec;
     event.trigger = parseTriggerType(triggerType);
     event.stopReason = stopReason;
@@ -423,7 +443,10 @@ void MqttManager::sendIrrigationEventToFirebase(const char* eventId,
 
     if (xQueueSend(firebaseQueue, &firebasePayload, 0) != pdTRUE) {
         fwLogLine("WARN", "FIREBASE", "Fila cheia; evento descartado");
+        return false;
     }
+
+    return true;
 }
 
 // ==================== UNIFICACAO DE PARSERS DE AGENDAMENTO (CORRIGIDO) ====================
@@ -1399,10 +1422,15 @@ void callback(char* topic, byte* payload, unsigned int length) {
         msg.concat((char)payload[i]);
     }
 
-    if (strcmp(topic, cachedCommandsTopic) == 0) {
+    if (strcmp(topic, cachedCommandsTopic) == 0 || strcmp(topic, LEGACY_COMMANDS_TOPIC) == 0) {
         if (!isLikelyJsonObject(msg) && msg != "ON" && msg != "OFF") {
             Serial.println("[MQTT] payload malformado: comando ignorado");
             return;
+        }
+
+        bool fromLegacyTopic = (strcmp(topic, LEGACY_COMMANDS_TOPIC) == 0);
+        if (fromLegacyTopic && (msg == "ON" || msg == "OFF")) {
+            Serial.println("[MQTT] comando legado ON/OFF recebido em topico global");
         }
 
         if (isLikelyJsonObject(msg) && !shouldHandlePayloadForThisDevice(msg)) {
@@ -1666,6 +1694,64 @@ void MqttManager::loop() {
         return;
     }
 
+    // ===== EVENTOS DE IRRIGACAO =====
+    // Executa ANTES do guard MQTT: o envio HTTP ao Firebase nao depende
+    // de MQTT — basta ter Wi-Fi. A publicacao MQTT e' tentada apenas se
+    // client.connected() for verdadeiro no momento do dispatch.
+    if (g_eventMgr) {
+        SensorData dispatchData = sensores.read();
+        IrrigationEvent pendingEvt;
+        while (g_eventMgr->getNextPendingEvent(&pendingEvt)) {
+            char startIso[32];
+            char endIso[32];
+            g_eventMgr->formatIso8601(pendingEvt.startAt, startIso, sizeof(startIso));
+            g_eventMgr->formatIso8601(pendingEvt.endAt,   endIso,   sizeof(endIso));
+
+            bool mqttPublished = false;
+            if (client.connected()) {
+                mqttPublished = publishIrrigationEvent(
+                    pendingEvt.eventId, startIso, endIso,
+                    pendingEvt.durationSec,
+                    g_eventMgr->getTriggerTypeString(pendingEvt.trigger),
+                    g_eventMgr->getStopReasonString(pendingEvt.stopReason),
+                    pendingEvt.totalPulses, pendingEvt.totalVolumeLiters,
+                    pendingEvt.avgFlowRateLpm, pendingEvt.flowDetected,
+                    pendingEvt.flowStatus, pendingEvt.totalVolumeMl,
+                    pendingEvt.accountingVolumeMl, pendingEvt.nominalFlowRateMlPerMin
+                );
+            }
+
+            if (!mqttPublished) {
+                fwLogf("WARN", "MQTT", "Evento MQTT nao publicado (desconectado?): %s", pendingEvt.eventId);
+            }
+
+            bool firebaseQueued = false;
+            if (!isAlreadyEnqueuedForFirebase(pendingEvt.eventId)) {
+                firebaseQueued = sendIrrigationEventToFirebase(
+                    pendingEvt.eventId, startIso, endIso,
+                    pendingEvt.durationSec,
+                    g_eventMgr->getTriggerTypeString(pendingEvt.trigger),
+                    pendingEvt.stopReason,
+                    dispatchData.umidadeSolo, (int)dispatchData.umidadeAr,
+                    dispatchData.temperatura, dispatchData.nivelAgua,
+                    pendingEvt.totalPulses, pendingEvt.totalVolumeLiters,
+                    pendingEvt.avgFlowRateLpm, pendingEvt.flowDetected,
+                    pendingEvt.flowStatus, pendingEvt.totalVolumeMl,
+                    pendingEvt.accountingVolumeMl, pendingEvt.nominalFlowRateMlPerMin
+                );
+                if (firebaseQueued) {
+                    markEnqueuedForFirebase(pendingEvt.eventId);
+                }
+            }
+
+            if (mqttPublished || firebaseQueued || isAlreadyEnqueuedForFirebase(pendingEvt.eventId)) {
+                g_eventMgr->markEventSent(pendingEvt.eventId);
+            } else {
+                break;
+            }
+        }
+    }
+
     if (!client.connected()) {
         if (mqttWasConnected) {
             fwLogLine("WARN", "MQTT", "MQTT desconectado");
@@ -1698,8 +1784,9 @@ void MqttManager::loop() {
         mqttJustConnected = false;
 
         client.subscribe(cachedCommandsTopic);
+        client.subscribe(LEGACY_COMMANDS_TOPIC);
         client.publish(cachedStatusTopic, "online", true);
-        fwLogf("INFO", "MQTT", "Subscribed em %s", cachedCommandsTopic);
+        fwLogf("INFO", "MQTT", "Subscribed em %s e %s", cachedCommandsTopic, LEGACY_COMMANDS_TOPIC);
 
         lastSolo = -1;
         lastTemp = -1000;
@@ -1796,69 +1883,6 @@ void MqttManager::loop() {
         lastTemp = (int)data.temperatura;
         lastUmidAr = (int)data.umidadeAr;
         pendingSensorStability = false;
-    }
-
-    // ===== EVENTOS DE IRRIGACAO =====
-    if (g_eventMgr && (mqttWasConnected || client.connected())) {
-        IrrigationEvent event;
-        while (g_eventMgr->getNextPendingEvent(&event)) {
-            char startIso[32];
-            char endIso[32];
-
-            g_eventMgr->formatIso8601(event.startAt, startIso, sizeof(startIso));
-            g_eventMgr->formatIso8601(event.endAt, endIso, sizeof(endIso));
-
-            bool mqttPublished = publishIrrigationEvent(
-                event.eventId,
-                startIso,
-                endIso,
-                event.durationSec,
-                g_eventMgr->getTriggerTypeString(event.trigger),
-                g_eventMgr->getStopReasonString(event.stopReason),
-                event.totalPulses,
-                event.totalVolumeLiters,
-                event.avgFlowRateLpm,
-                event.flowDetected,
-                event.flowStatus,
-                event.totalVolumeMl,
-                event.accountingVolumeMl,
-                event.nominalFlowRateMlPerMin
-            );
-
-            if (!mqttPublished) {
-                fwLogf("WARN", "MQTT", "Evento pendente mantido para retry: %s", event.eventId);
-            }
-
-            if (!isAlreadyEnqueuedForFirebase(event.eventId)) {
-                sendIrrigationEventToFirebase(
-                    event.eventId,
-                    startIso,
-                    endIso,
-                    event.durationSec,
-                    g_eventMgr->getTriggerTypeString(event.trigger),
-                    event.stopReason,
-                    data.umidadeSolo,
-                    (int)data.umidadeAr,
-                    data.temperatura,
-                    data.nivelAgua,
-                    event.totalPulses,
-                    event.totalVolumeLiters,
-                    event.avgFlowRateLpm,
-                    event.flowDetected,
-                    event.flowStatus,
-                    event.totalVolumeMl,
-                    event.accountingVolumeMl,
-                    event.nominalFlowRateMlPerMin
-                );
-                markEnqueuedForFirebase(event.eventId);
-            }
-
-            if (!mqttPublished) {
-                break;
-            }
-
-            g_eventMgr->markEventSent(event.eventId);
-        }
     }
 
     if (now - lastHeartbeat >= 10000) {

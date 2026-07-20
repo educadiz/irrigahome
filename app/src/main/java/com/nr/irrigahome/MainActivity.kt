@@ -359,7 +359,7 @@ fun SplashScreen(onTimeout: () -> Unit) {
         }
         // Footer
         Text(
-            text = "Criado e desenvolvido por CodeWave | 2026",
+            text = "Versão ${BuildConfig.VERSION_NAME} · CodeWave | 2026",
             fontSize = 9.sp,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier
