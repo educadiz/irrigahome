@@ -1,6 +1,6 @@
 IrrigaHome - Descricao Geral do Projeto
 ======================================
-Ultima atualizacao: 2026-06-16
+Ultima atualizacao: 2026-07-21
 
 1) Visao geral
 --------------
@@ -507,3 +507,56 @@ Observacao final:
   - Adicionar monitoramento/alertas basicos (logs remotos, notificacoes de falha de conexao).
 
 -- Fim das novas implementacoes
+
+
+11) Ultimas implementacoes (2026-07)
+------------------------------------
+
+A. Firmware ESP32 - webserver de manutencao (seguranca de senha)
+- Senha do painel local migrada para armazenamento seguro em NVS com:
+  - hash SHA-256
+  - salt aleatorio
+  - comparacao em tempo constante
+- Tipos de senha suportados:
+  - senha padrao derivada do MAC (ultimos 4 caracteres, minusculo)
+  - senha personalizada definida pelo usuario
+  - senha temporaria de recuperacao com expiracao
+- Novos endpoints no webserver:
+  - POST /api/password/change
+  - POST /api/password/recover
+  - GET  /api/password/status
+- Fluxo de primeiro acesso:
+  - se nao houver senha persistida, firmware gera senha padrao por MAC e grava na NVS.
+
+B. Recuperacao de senha por e-mail (Cloud Function)
+- Nova function: requestMaintenancePasswordRecovery
+- Funcao valida owner do device, gera senha temporaria, envia por SMTP e retorna hash/salt/expiracao.
+- Firmware persiste hash/salt temporario sem expor senha em texto puro.
+
+C. Notificacao por e-mail de irrigacao concluida
+- Nova trigger Firestore: onIrrigationEventNotification
+- Envia e-mail quando evento for:
+  - success=true
+  - trigger automatic ou schedule
+  - transicao para evento finalizado (com endAt)
+- Evita duplicidade com campo emailNotificationSentAt.
+
+D. Opt-in/opt-out de notificacao no webserver
+- Adicionado toggle no painel de manutencao para usuario escolher receber ou nao e-mails.
+- Estado inicial padrao: ativado.
+- Preferencia persistida localmente no firmware.
+- Firmware envia campo emailNotificationEnabled no payload dos eventos.
+- Backend respeita a flag e nao envia notificacao quando desativada.
+
+E. Deploy e status operacional
+- Functions atualizadas em producao (us-central1):
+  - saveIrrigationEvent
+  - onMqttIrrigationEvent
+  - onIrrigationEventNotification
+  - requestMaintenancePasswordRecovery
+- Configuracao SMTP validada em arquivo de ambiente por projeto.
+
+F. Observacoes tecnicas
+- No ESP32 Arduino Core 3.x, funcoes mbedtls com sufixo _ret foram ajustadas para API atual.
+- webTask do webserver com stack ampliada para suportar fluxo HTTPS de recuperacao de senha.
+

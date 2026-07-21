@@ -1,5 +1,5 @@
 const { onRequest } = require("firebase-functions/v2/https");
-const { onDocumentCreated, onDocumentUpdated, onDocumentDeleted } = require("firebase-functions/v2/firestore");
+const { onDocumentCreated, onDocumentUpdated, onDocumentDeleted, onDocumentWritten } = require("firebase-functions/v2/firestore");
 const admin = require("firebase-admin");
 
 admin.initializeApp();
@@ -663,6 +663,7 @@ exports.saveIrrigationEvent = onRequest(
       const totalVolumeLiters = data.totalVolumeLiters != null ? (Number.isFinite(Number(data.totalVolumeLiters)) ? Number(parseFloat(data.totalVolumeLiters)) : null) : null;
       const totalVolumeMl = data.totalVolumeMl != null ? (Number.isFinite(Number(data.totalVolumeMl)) ? Number(parseFloat(data.totalVolumeMl)) : null) : (totalVolumeLiters != null ? totalVolumeLiters * 1000 : null);
       const ownerUid = await resolveDeviceOwnerUid(data.deviceId);
+      const emailNotificationEnabled = !(data.emailNotificationEnabled === false || data.emailNotificationEnabled === "false" || data.emailNotificationEnabled === 0 || data.emailNotificationEnabled === "0");
       const eventData = {
         deviceId: data.deviceId,
         macAddress: data.deviceId,
@@ -688,6 +689,7 @@ exports.saveIrrigationEvent = onRequest(
         flowDetected: data.flowDetected === true || data.flowDetected === 'true' ? true : (data.flowDetected === false || data.flowDetected === 'false' ? false : null),
         flowStatus: data.flowStatus || null,
         waterLevel: data.waterLevel || null,
+        emailNotificationEnabled,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         ...(ownerUid ? { ownerUid } : {}),
@@ -766,6 +768,7 @@ exports.onMqttIrrigationEvent = onRequest(
           ? (Number.isFinite(Number(flowSensor.totalVolumeMl)) ? Number(parseFloat(flowSensor.totalVolumeMl)) : null)
           : (totalVolumeLiters != null ? totalVolumeLiters * 1000 : null));
       const ownerUid = await resolveDeviceOwnerUid(payload.deviceId);
+      const emailNotificationEnabled = !(payload.emailNotificationEnabled === false || payload.emailNotificationEnabled === "false" || payload.emailNotificationEnabled === 0 || payload.emailNotificationEnabled === "0");
       const eventData = {
         deviceId: payload.deviceId,
         macAddress: payload.deviceId,
@@ -805,6 +808,7 @@ exports.onMqttIrrigationEvent = onRequest(
               : (flowSensor.flowDetected === false || flowSensor.flowDetected === 'false' ? false : null))),
         flowStatus: payload.flowStatus || flowSensor.flowStatus || null,
         waterLevel: payload.waterLevel || null,
+              emailNotificationEnabled,
         createdAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         ...(ownerUid ? { ownerUid } : {}),
@@ -877,6 +881,346 @@ exports.getDeviceSchedules = onRequest(
     } catch (error) {
       console.error("[getDeviceSchedules] Erro:", error);
       res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// 🔹 Recuperação de senha do painel de manutenção local
+// O firmware ESP32 chama este endpoint passando deviceId + email.
+// A CF valida o e-mail contra o owner do dispositivo, gera uma senha
+// temporária com validade de 30 min, envia por e-mail e retorna o
+// hash+salt (SHA-256) para o firmware persistir na NVS.
+//
+// Fluxo de segurança:
+//  1. Verifica se deviceId é válido e tem ownerUid
+//  2. Busca o e-mail do owner em users/{ownerUid}
+//  3. Compara com o e-mail informado (case-insensitive)
+//  4. Gera senha temporária aleatória (8 chars hex)
+//  5. Calcula hash+salt que serão persistidos no firmware
+//  6. Envia e-mail via nodemailer (configurar SMTP em variáveis de ambiente)
+//  7. Retorna hash+salt+expiresAt para o firmware
+exports.requestMaintenancePasswordRecovery = onRequest(
+  { invoker: "public" },
+  async (req, res) => {
+    if (req.method !== "POST") {
+      return res.status(405).json({ ok: false, error: "Metodo nao permitido" });
+    }
+
+    try {
+      const deviceId = typeof req.body.deviceId === "string"
+        ? req.body.deviceId.trim().toLowerCase().replace(/[:-]/g, "")
+        : "";
+      const emailInput = typeof req.body.email === "string"
+        ? req.body.email.trim().toLowerCase()
+        : "";
+
+      if (!deviceId) {
+        return res.status(400).json({ ok: false, error: "deviceId obrigatorio" });
+      }
+      if (!emailInput || !emailInput.includes("@")) {
+        return res.status(400).json({ ok: false, error: "e-mail invalido" });
+      }
+
+      // 1. Localiza ownerUid pelo deviceId
+      const ownerUid = await resolveDeviceOwnerUid(deviceId);
+      if (!ownerUid) {
+        // Resposta genérica para não confirmar existência do dispositivo
+        return res.status(200).json({ ok: false, error: "Nao foi possivel validar as informacoes. Verifique o e-mail informado." });
+      }
+
+      // 2. Busca e-mail do owner no Firestore
+      const userSnap = await db.collection("users").doc(ownerUid).get();
+      if (!userSnap.exists) {
+        return res.status(200).json({ ok: false, error: "Nao foi possivel validar as informacoes. Verifique o e-mail informado." });
+      }
+      const ownerEmail = typeof userSnap.get("email") === "string"
+        ? userSnap.get("email").trim().toLowerCase()
+        : "";
+
+      // 3. Compara e-mail
+      if (!ownerEmail || ownerEmail !== emailInput) {
+        return res.status(200).json({ ok: false, error: "Nao foi possivel validar as informacoes. Verifique o e-mail informado." });
+      }
+
+      // 4. Gera senha temporária aleatória (8 hex chars = 4 bytes)
+      const crypto = require("crypto");
+      const tempPassword = crypto.randomBytes(4).toString("hex"); // ex: "a3f91c7b"
+      const salt         = crypto.randomBytes(16).toString("hex");
+
+      // 5. Calcula hash SHA-256(salt + password) — mesmo algoritmo do firmware
+      const hash = crypto.createHash("sha256").update(salt + tempPassword).digest("hex");
+
+      // Expiração: 30 minutos a partir de agora
+      const expiresAt = Math.floor(Date.now() / 1000) + 1800;
+
+      // 6. Envia e-mail com a senha temporária
+      // Usa nodemailer com SMTP configurado nas variáveis de ambiente:
+      //   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM
+      const smtpHost = process.env.SMTP_HOST || "";
+      if (smtpHost) {
+        try {
+          const nodemailer = require("nodemailer");
+          const transporter = nodemailer.createTransport({
+            host: smtpHost,
+            port: parseInt(process.env.SMTP_PORT || "587", 10),
+            secure: process.env.SMTP_SECURE === "true",
+            auth: {
+              user: process.env.SMTP_USER,
+              pass: process.env.SMTP_PASS,
+            },
+          });
+          await transporter.sendMail({
+            from: process.env.SMTP_FROM || process.env.SMTP_USER,
+            to: ownerEmail,
+            subject: "Irriga Home — Senha temporária de manutenção",
+            text: [
+              "Você solicitou a recuperação da senha do painel de manutenção do seu irrigador.",
+              "",
+              `Senha temporária: ${tempPassword}`,
+              "",
+              "Validade: 30 minutos.",
+              "Após o primeiro acesso, você será solicitado a definir uma nova senha.",
+              "",
+              "Se você não solicitou essa recuperação, ignore este e-mail.",
+            ].join("\n"),
+          });
+          console.log(`[recovery] e-mail enviado para ${ownerEmail} device=${deviceId}`);
+        } catch (mailErr) {
+          console.error("[recovery] falha ao enviar e-mail:", mailErr);
+          // Não aborta: retorna hash mesmo assim (o usuário pode tentar novamente)
+        }
+      } else {
+        // SMTP não configurado: loga a senha temporária apenas no servidor (uso em desenvolvimento)
+        console.warn(`[recovery] SMTP nao configurado. Senha temporaria para device=${deviceId}: ${tempPassword}`);
+      }
+
+      // 7. Retorna hash+salt+expiresAt para o firmware
+      return res.status(200).json({
+        ok: true,
+        hash,
+        salt,
+        expiresAt,
+      });
+    } catch (error) {
+      console.error("[recovery] Erro:", error);
+      return res.status(500).json({ ok: false, error: error.message });
+    }
+  }
+);
+
+// ── Notificações por e-mail após irrigação bem-sucedida ──────────────────────
+// Dispara via Firestore trigger sempre que um evento de irrigação é finalizado
+// com success=true e trigger automático ou agendado.
+
+function irrigFormatDateBR(value) {
+  if (!value) return "—";
+  let d;
+  if (typeof value.toDate === "function") d = value.toDate();
+  else if (value instanceof Date) d = value;
+  else d = new Date(value);
+  if (isNaN(d.getTime())) return "—";
+  return d.toLocaleString("pt-BR", {
+    timeZone: "America/Sao_Paulo",
+    day: "2-digit", month: "2-digit", year: "numeric",
+    hour: "2-digit", minute: "2-digit",
+  });
+}
+
+function irrigFormatDuration(sec) {
+  if (!sec || sec <= 0) return "—";
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m === 0) return `${s}s`;
+  if (s === 0) return `${m} min`;
+  return `${m} min ${s}s`;
+}
+
+function irrigFormatVolume(ml) {
+  const v = Number(ml);
+  if (!ml || isNaN(v) || v <= 0) return null;
+  return v >= 1000 ? `${(v / 1000).toFixed(2).replace(".", ",")} L` : `${v.toFixed(0)} mL`;
+}
+
+function buildIrrigationEmailHtml({ userName, deviceName, trigger, data }) {
+  const isAuto = trigger === "automatic" || trigger === "automatico" || trigger === "auto";
+  const isSchedule = trigger === "schedule";
+  if (!isAuto && !isSchedule) return null;
+
+  const startFmt = irrigFormatDateBR(data.startAt);
+  const soilPct  = data.soilHumidity != null ? `${data.soilHumidity}%` : null;
+
+  const eventIcon  = isAuto ? "\uD83C\uDF31" : "\uD83D\uDCC5";
+  const eventTitle = isAuto ? "Irriga\u00E7\u00E3o autom\u00E1tica realizada" : "Irriga\u00E7\u00E3o agendada realizada";
+
+  const reasonHtml = isAuto
+    ? `<div style="background:#f0fdf4;border-left:4px solid #22c55e;border-radius:0 8px 8px 0;padding:14px 16px;margin:0 0 22px">
+        <p style="margin:0;font-size:13px;line-height:1.7;color:#166534">
+          \u2705 <strong>Irriga\u00E7\u00E3o conclu\u00EDda com sucesso</strong><br>
+          ${soilPct ? `A umidade do solo estava em <strong>${soilPct}</strong>, valor inferior ao limite configurado.` : "A umidade do solo estava abaixo do limite configurado."}
+          O sistema iniciou automaticamente a irriga\u00E7\u00E3o para manter a sa\u00FAde da vegeta\u00E7\u00E3o.
+        </p>
+      </div>`
+    : `<div style="background:#eff6ff;border-left:4px solid #3b82f6;border-radius:0 8px 8px 0;padding:14px 16px;margin:0 0 22px">
+        <p style="margin:0;font-size:13px;line-height:1.7;color:#1e40af">
+          \u2705 <strong>Irriga\u00E7\u00E3o programada conclu\u00EDda com sucesso</strong><br>
+          O agendamento configurado para <strong>${startFmt}</strong> foi executado normalmente.
+        </p>
+      </div>`;
+
+  const tel = [];
+  const addRow = (label, value) => { if (value != null && value !== "" && value !== "\u2014") tel.push([label, value]); };
+  addRow("\uD83D\uDCC5 Data e hora",         startFmt);
+  addRow("\u23F1\uFE0F Dura\u00E7\u00E3o",   irrigFormatDuration(data.durationSec));
+  addRow("\uD83D\uDCA7 Umidade do solo",     soilPct);
+  addRow("\uD83C\uDF21\uFE0F Temperatura",   data.temperature != null ? `${parseFloat(data.temperature).toFixed(1)}\u00B0C` : null);
+  addRow("\uD83D\uDCA8 Umidade do ar",       data.airHumidity  != null ? `${data.airHumidity}%` : null);
+  addRow("\uD83D\uDEB0 Reservat\u00F3rio",   data.waterLevel || null);
+  addRow("\uD83D\uDCA6 Volume estimado",     irrigFormatVolume(data.totalVolumeMl));
+  addRow("\uD83D\uDD04 Tipo de irriga\u00E7\u00E3o", isAuto ? "Autom\u00E1tica (sensor de solo)" : "Agendada");
+  if (data.firmwareVersion) addRow("\u2699\uFE0F Firmware", data.firmwareVersion);
+
+  const telRows = tel.map(([l, v]) => `
+      <tr>
+        <td style="padding:9px 14px;font-size:13px;color:#64748b;border-bottom:1px solid #f1f5f9;white-space:nowrap">${l}</td>
+        <td style="padding:9px 14px;font-size:13px;font-weight:600;color:#1e293b;border-bottom:1px solid #f1f5f9">${v}</td>
+      </tr>`).join("");
+
+  return `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Irriga Home \u2014 Notifica\u00E7\u00E3o de Irriga\u00E7\u00E3o</title>
+</head>
+<body style="margin:0;padding:0;background:#f1f5f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif">
+<table width="100%" cellpadding="0" cellspacing="0" role="presentation" style="background:#f1f5f9;padding:32px 16px">
+<tr><td align="center">
+<table width="100%" style="max-width:580px;background:#fff;border-radius:16px;overflow:hidden;border:1px solid #e2e8f0" cellpadding="0" cellspacing="0">
+
+  <tr><td style="background:#0f172a;padding:22px 28px">
+    <p style="margin:0;font-size:20px;font-weight:700;color:#fff;letter-spacing:-.01em">\uD83C\uDF31 Irriga Home</p>
+    <p style="margin:3px 0 0;font-size:12px;color:#94a3b8">Sistema de irriga\u00E7\u00E3o inteligente</p>
+  </td></tr>
+
+  <tr><td style="padding:28px">
+    <p style="margin:0 0 6px;font-size:26px">${eventIcon}</p>
+    <h1 style="margin:0 0 8px;font-size:19px;font-weight:700;color:#0f172a;line-height:1.3">${eventTitle}</h1>
+    <p style="margin:0 0 22px;font-size:14px;color:#64748b;line-height:1.7">
+      Ol\u00E1, <strong style="color:#1e293b">${userName || "usu\u00E1rio"}</strong>!<br>
+      Seu irrigador <strong style="color:#1e293b">${deviceName}</strong> realizou uma irriga\u00E7\u00E3o com sucesso.
+    </p>
+    ${reasonHtml}
+    <p style="margin:0 0 10px;font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#94a3b8">Dados da opera\u00E7\u00E3o</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden">
+      ${telRows}
+    </table>
+  </td></tr>
+
+  <tr><td style="background:#f8fafc;padding:18px 28px;border-top:1px solid #e2e8f0">
+    <p style="margin:0 0 6px;font-size:13px;color:#475569;line-height:1.7">
+      Obrigado por utilizar o <strong>Irriga Home</strong>.<br>
+      Estamos trabalhando para que suas plantas recebam sempre a quantidade ideal de \u00E1gua, de forma inteligente e autom\u00E1tica.
+    </p>
+    <p style="margin:8px 0 0;font-size:11px;color:#94a3b8">Este e-mail foi gerado automaticamente \u2014 por favor n\u00E3o responda.</p>
+  </td></tr>
+
+</table>
+</td></tr>
+</table>
+</body>
+</html>`;
+}
+
+async function sendIrrigationNotificationEmail(to, subject, html) {
+  const smtpHost = process.env.SMTP_HOST || "";
+  if (!smtpHost) {
+    console.warn("[notify] SMTP nao configurado \u2014 notifica\u00E7\u00E3o ignorada");
+    return false;
+  }
+  const nodemailer = require("nodemailer");
+  const transporter = nodemailer.createTransport({
+    host: smtpHost,
+    port: parseInt(process.env.SMTP_PORT || "587", 10),
+    secure: process.env.SMTP_SECURE === "true",
+    auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+  });
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM || process.env.SMTP_USER,
+    to,
+    subject,
+    html,
+  });
+  return true;
+}
+
+async function resolveOwnerNameAndEmail(ownerUid) {
+  if (!ownerUid) return { name: null, email: null };
+  try {
+    const snap = await db.collection("users").doc(ownerUid).get();
+    if (!snap.exists) return { name: null, email: null };
+    return { name: snap.get("name") || null, email: snap.get("email") || null };
+  } catch (e) {
+    console.warn("[notify] falha ao buscar dados do owner:", e.message);
+    return { name: null, email: null };
+  }
+}
+
+exports.onIrrigationEventNotification = onDocumentWritten(
+  { document: `irrigationHistory/{deviceId}/${HISTORY_COLLECTION_NAME}/{eventId}` },
+  async (event) => {
+    const after  = event.data?.after?.data();
+    const before = event.data?.before?.data();
+
+    // Pré-condições: evento concluído com sucesso e endAt presente
+    if (!after || after.success !== true || !after.endAt) return;
+    // Deduplicação: não reenvia se o e-mail já foi enviado
+    if (after.emailNotificationSentAt) return;
+    const emailNotificationEnabled = !(after.emailNotificationEnabled === false || after.emailNotificationEnabled === "false" || after.emailNotificationEnabled === 0 || after.emailNotificationEnabled === "0");
+    if (!emailNotificationEnabled) return;
+    // Apenas irrigação automática ou agendada gera notificação
+    const trigger = typeof after.trigger === "string" ? after.trigger.toLowerCase() : "";
+    if (trigger !== "automatic" && trigger !== "schedule") return;
+    // Dispara apenas na transição sem-endAt → com-endAt (evita reprocessar updates posteriores)
+    if (before && before.endAt != null) return;
+
+    const deviceId = event.params.deviceId;
+    const ownerUid = after.ownerUid || await resolveDeviceOwnerUid(deviceId);
+    if (!ownerUid) {
+      console.warn(`[notify] ownerUid nao resolvido device=${deviceId}`);
+      return;
+    }
+
+    const { name, email } = await resolveOwnerNameAndEmail(ownerUid);
+    if (!email) {
+      console.warn(`[notify] e-mail do owner nao encontrado uid=${ownerUid}`);
+      return;
+    }
+
+    // Resolve nome amigável do dispositivo
+    let deviceName = deviceId;
+    try {
+      const devSnap = await db.collection("users").doc(ownerUid).collection("devices").doc(deviceId).get();
+      const stored  = devSnap.get("deviceName") || devSnap.get("name");
+      if (stored) deviceName = stored;
+    } catch { /* usa deviceId como fallback */ }
+
+    const html = buildIrrigationEmailHtml({ userName: name, deviceName, trigger, data: after });
+    if (!html) return;
+
+    const trigLabel = trigger === "automatic" ? "Autom\u00E1tica" : "Agendada";
+    const subject   = `\uD83C\uDF31 Irriga Home \u2014 Irriga\u00E7\u00E3o ${trigLabel} realizada com sucesso`;
+
+    try {
+      const sent = await sendIrrigationNotificationEmail(email, subject, html);
+      if (sent) {
+        console.log(`[notify] e-mail enviado para ${email} device=${deviceId} trigger=${trigger}`);
+        // Persiste flag para evitar reenvio em caso de retrigger do Firestore
+        await event.data.after.ref.update({
+          emailNotificationSentAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      }
+    } catch (err) {
+      console.error(`[notify] erro ao enviar e-mail device=${deviceId}:`, err.message);
     }
   }
 );

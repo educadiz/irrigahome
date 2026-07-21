@@ -42,6 +42,7 @@ public:
         doc["macAddress"] = deviceId;
         doc["historyCollection"] = "events";
         doc["ownerUid"] = ownerUid;
+        doc["emailNotificationEnabled"] = getEmailNotificationEnabled();
         
         // ===== CORREÇÃO: trigger como STRING =====
         doc["eventId"] = event.eventId;
@@ -106,6 +107,7 @@ public:
         doc["macAddress"] = deviceId;
         doc["historyCollection"] = "events";
         doc["ownerUid"] = ownerUid;
+        doc["emailNotificationEnabled"] = getEmailNotificationEnabled();
         
         // Evento
         doc["eventId"] = event.eventId;

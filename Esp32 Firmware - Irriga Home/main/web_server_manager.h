@@ -33,6 +33,9 @@ private:
     void handleFlowTestStart();
     void handleFlowCalibration();
     void handleResetSchedules();
+    void handlePasswordChange();
+    void handlePasswordRecover();
+    void handlePasswordStatus();
 
     SensorManager* _sensors  = nullptr;
     ActuatorManager* _actuator = nullptr;

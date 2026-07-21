@@ -69,6 +69,39 @@ static inline void setOwnerUid(const String& uid) {
     }
 }
 
+#define EMAIL_NOTIFICATION_STORAGE "/email_notify.txt"
+
+static inline bool getEmailNotificationEnabled() {
+    if (LittleFS.begin()) {
+        if (LittleFS.exists(EMAIL_NOTIFICATION_STORAGE)) {
+            File f = LittleFS.open(EMAIL_NOTIFICATION_STORAGE, "r");
+            if (f) {
+                String value = f.readString();
+                value.trim();
+                value.toLowerCase();
+                f.close();
+                if (value == "0" || value == "false" || value == "off") {
+                    return false;
+                }
+                if (value == "1" || value == "true" || value == "on") {
+                    return true;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+static inline void setEmailNotificationEnabled(bool enabled) {
+    if (LittleFS.begin()) {
+        File f = LittleFS.open(EMAIL_NOTIFICATION_STORAGE, "w");
+        if (f) {
+            f.print(enabled ? "1" : "0");
+            f.close();
+        }
+    }
+}
+
 // PINOS
 #define DHTPIN 4
 #define RESET 27

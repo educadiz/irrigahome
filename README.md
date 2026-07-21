@@ -47,10 +47,20 @@ O IrrigaHome é uma solução completa de irrigação automatizada para uso resi
 - Fluxômetro com dois modos de calibração (simples e regressão linear por mínimos quadrados)
 - Display TFT ST7789 240×320 com dashboard animado e carrossel de cabeçalho
 - Web server de manutenção (HTTP) com interface SPA para calibração de sensores e diagnóstico
+- Autenticação no webserver com senha persistida em NVS (hash SHA-256 + salt)
+- Senha padrão inicial baseada nos últimos 4 caracteres do MAC (minúsculo)
+- Troca de senha local e recuperação por e-mail com senha temporária expirada por tempo
+- Preferência de notificação por e-mail (liga/desliga) no webserver, ativada por padrão
 - Persistência de configurações e agendamentos na NVS e histórico em LittleFS
 - Recuperação automática pós-reboot de irrigação interrompida
 - Telemetria delta via MQTT (publica apenas quando há mudança)
 - Duplo núcleo: Core 1 (controle/sensores) e Core 0 (MQTT, Firebase, WebServer)
+
+### Backend Firebase (Cloud Functions)
+- Endpoint de recuperação de senha de manutenção com validação de owner + envio via SMTP
+- Trigger Firestore para notificar por e-mail irrigações bem-sucedidas automáticas/agendadas
+- Deduplicação por `emailNotificationSentAt` para evitar reenvio em retriggers
+- Respeita a preferência `emailNotificationEnabled` enviada pelo firmware
 
 ---
 
@@ -119,7 +129,8 @@ Presentation  →  Domain  →  Data
 |---|---|
 | Firebase Authentication | Login email/senha + reset de senha |
 | Firebase Firestore | Dispositivos, histórico e agendamentos |
-| Firebase Cloud Functions | Node.js v2 — recebe eventos do ESP32 via HTTP |
+| Firebase Cloud Functions | Node.js v2/Gen 2 — HTTP + triggers Firestore |
+| Nodemailer (SMTP) | Recuperação de senha e notificações de irrigação por e-mail |
 | HiveMQ Cloud | Broker MQTT gerenciado, SSL porta 8883 |
 
 ---
@@ -155,10 +166,10 @@ IrrigaHome/
 ### Pré-requisitos
 
 - Android Studio Hedgehog ou superior
-- Arduino IDE 2.x com suporte ao ESP32 (ESP32 Arduino Core 2.x)
+- Arduino IDE 2.x com suporte ao ESP32 (ESP32 Arduino Core 3.x)
 - Conta Firebase com projeto configurado
 - Broker MQTT (ex: HiveMQ Cloud — plano gratuito disponível)
-- Node.js 18+ (para deploy das Cloud Functions)
+- Node.js 22+ (para deploy das Cloud Functions)
 
 ---
 
@@ -212,9 +223,16 @@ Edite `secrets.h` com seus dados:
 #define MQTT_PORT        8883
 #define MQTT_USER        "SEU_USUARIO_MQTT"
 #define MQTT_PASS        "SUA_SENHA_MQTT"
-#define FIREBASE_PROJECT_URL "https://us-central1-SEU_PROJETO.cloudfunctions.net"
-#define WEBSERVER_PASS   "SUA_SENHA_WEB"
+#define FIREBASE_SAVE_EVENT_URL "https://saveirrigationevent-...run.app"
+#define FIREBASE_GET_HISTORY_URL "https://gethistoricoirrigacao-...run.app"
+#define FIREBASE_GET_SCHEDULES_URL "https://getagendamentos-...run.app"
+#define FIREBASE_GET_DEVICE_SCHEDULES_URL "https://getdeviceschedules-...run.app"
+#define FIREBASE_RECOVERY_URL "https://requestmaintenancepasswordrecovery-...run.app"
+#define WEBSERVER_PASS   "2260" // legado/fallback inicial
 ```
+
+Observação: no firmware atual, `WEBSERVER_PASS` é apenas fallback de migração.
+A senha efetiva do painel é persistida com hash+salt na NVS após o primeiro boot.
 
 Instale as bibliotecas necessárias na Arduino IDE:
 - `PubSubClient`
@@ -243,7 +261,17 @@ MQTT_PASSWORD=SUA_SENHA_MQTT
 MQTT_TOPIC_COMMANDS=irrigahome/commands
 MQTT_RETAIN_MESSAGES=false
 MQTT_CLIENT_ID=irrigahome-fn-prod
+
+# SMTP (necessário para recuperação de senha e notificações)
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=seuemail@gmail.com
+SMTP_PASS=sua_app_password_sem_espacos
+SMTP_FROM=Irriga Home <seuemail@gmail.com>
 ```
+
+Para produção no projeto Firebase, use também `.env.<project-id>` (exemplo: `.env.irrigahome-db0c6`).
 
 Faça o deploy:
 
@@ -301,10 +329,10 @@ Este repositório **não contém credenciais**. Todos os dados sensíveis são g
 
 | Arquivo | Status | Conteúdo protegido |
 |---|---|---|
-| `secrets.h` | gitignored | Wi-Fi, MQTT, Firebase URL, senha web |
+| `secrets.h` | gitignored | Wi-Fi, MQTT, URLs das functions e fallback de senha web |
 | `local.properties` | gitignored | MQTT (Android) |
 | `app/google-services.json` | gitignored | API key Firebase |
-| `irrigahome-functions/functions/.env` | gitignored | MQTT (Cloud Functions) |
+| `irrigahome-functions/functions/.env*` | gitignored | MQTT e SMTP (Cloud Functions) |
 
 Templates com placeholders estão disponíveis como referência:
 - `secrets.example.h`
